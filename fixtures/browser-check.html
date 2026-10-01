@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><title>未央浏览器环境验证</title>
+<style>
+body{font:20px system-ui;background:#f4f6fb;color:#23314d;padding:60px}
+main{max-width:740px;margin:auto;background:white;border-radius:18px;padding:36px}
+input,button{font:inherit;padding:12px;border-radius:8px;border:1px solid #b7c3d8}
+button{background:#345fe7;color:white;cursor:pointer} label{display:block;margin:28px 0 12px}
+output{display:block;margin:24px 0;font-weight:bold} small{color:#63718a}
+</style><main><h1>浏览器环境验证</h1>
+<p>填写测试文字，点击按钮，确认页面能响应。</p>
+<label for="draft">测试文字</label><input id="draft" placeholder="输入一句话">
+<button id="check">验证操作</button><output id="result">尚未点击</output>
+<p>已保存标记：<span id="marker"></span></p><small>此页面仅使用本机测试数据。</small>
+</main><script>
+const saved = localStorage.getItem('weiyang-fixture-marker');
+document.querySelector('#marker').textContent = saved || '暂无';
+document.querySelector('#check').onclick = () => {
+  const text = document.querySelector('#draft').value;
+  document.querySelector('#result').textContent = '已验证：' + text;
+  localStorage.setItem('weiyang-fixture-marker', text);
+  document.querySelector('#marker').textContent = text;
+};
+</script></html>

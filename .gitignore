@@ -1,0 +1,43 @@
+# Local secrets/configuration
+.env
+.env.*
+!.env.example
+config.local.*
+local/
+secrets/
+
+# Runtime state and unpublished content
+data/
+artifacts/
+browser-profile/
+playwright/.auth/
+backups/
+downloads/
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.log
+
+# Dependencies and generated files
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+dist/
+build/
+test-results/
+playwright-report/
+
+# OS/editor files and installation/media bundles
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.dmg
+*.pkg
+*.exe
+*.tar
+*.tar.gz
+*.zip

@@ -1,0 +1,29 @@
+name: weiyang-publicity
+services:
+  browser:
+    build:
+      context: .
+      dockerfile: browser/Dockerfile
+    shm_size: 2gb
+    ports:
+      - "127.0.0.1:${BROWSER_VIEW_PORT:-7900}:7900"
+    environment:
+      SE_VNC_PASSWORD: ${BROWSER_VIEW_PASSWORD:?Run scripts/init_local.py first}
+      SE_NODE_MAX_SESSIONS: "1"
+      SE_NODE_SESSION_TIMEOUT: "86400"
+      SE_SCREEN_WIDTH: "1440"
+      SE_SCREEN_HEIGHT: "1000"
+      SE_ENABLE_TRACING: "false"
+    volumes:
+      - browser-data:/home/seluser/profile
+      - browser-artifacts:/opt/artifacts
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:4444/status"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 20s
+    stop_grace_period: 30s
+volumes:
+  browser-data:
+  browser-artifacts:
