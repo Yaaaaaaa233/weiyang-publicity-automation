@@ -1,0 +1,12 @@
+{
+  "date": "2026-01-01",
+  "composer_url": "REPLACE_WITH_OBSERVED_XIUMI_SYNC_URL",
+  "target_account": "填写实际已授权的目标账号显示名称",
+  "plan_confirmed": false,
+  "prior_sync_attempts": 0,
+  "articles": [
+    {"row": 6, "is_headline": false, "source_title": "示例栏目丨非头条稿件", "sync_title": "示例栏目丨非头条稿件"},
+    {"row": 7, "is_headline": true, "source_title": "示例栏目丨头条稿件", "sync_title": "示例栏目丨头条稿件"},
+    {"row": 8, "is_headline": false, "source_title": "另一个示例栏目丨稿件", "sync_title": "另一个示例栏目丨稿件"}
+  ]
+}

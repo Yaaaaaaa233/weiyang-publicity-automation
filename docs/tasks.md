@@ -4,6 +4,8 @@
 
 它保存来源、状态、当前步骤、证据路径、待办、版本及事件历史。它尚未接入自动模型执行循环、BOT 或定时任务，也未作为独立 Docker `workflow` 服务运行。
 
+新增 `scripts/sync_workflow.py` 将已确认计划到秀米组合的步骤接入本账本，按账号/日期关联任务，并在点击同步前记录不可自动重放的提交意图；每次结束释放租约并导出交接。该程序是确定步骤的宿主机脚本，不是独立模型循环。用法及实际覆盖见[同步组合脚本](sync-workflow.md)。
+
 ## 手动运行
 
 ```sh
@@ -65,3 +67,7 @@ python3 scripts/taskctl.py import artifacts/task-handoff.json
 本机数据：`data/tasks.sqlite`；测试导入库：`data/import-validation.sqlite`；交接：`artifacts/task-handoff.json`。这些文件均由 Git 忽略。
 
 这是同一台 Mac 上的迁移模拟，没有实际换 agent 或 Windows 设备，没有创建业务调度，也没有向聊天平台发送消息。
+
+## 跨设备补充验收
+
+2026-10-03，合成任务从 Mac 导出，在 Windows 的 DeepSeek Harness 中导入、接续并导出完成记录。任务和证据经 UU 文件传输返回后，Mac 校验 6 项检查点证据、原始事件及合成文件，再导入独立 Mac 账本，任务和完整历史一致。实际换设备及执行者的合成交接已通过，详见 [Windows 迁移验证](windows-migration-validation.md)。不覆盖原 Mac 的旧版本记录，也不把这次结果写成真实稿件或登录状态迁移通过。

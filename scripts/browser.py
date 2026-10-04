@@ -32,6 +32,16 @@ const rect = e => {
   const r = e.getBoundingClientRect();
   return {x:r.x, y:r.y, width:r.width, height:r.height};
 };
+const path = e => {
+  const parts = [];
+  while (e && e.nodeType === Node.ELEMENT_NODE) {
+    const tag = e.tagName.toLowerCase();
+    const peers = e.parentElement ? [...e.parentElement.children].filter(x => x.tagName === e.tagName) : [e];
+    parts.unshift(tag + ':nth-of-type(' + (peers.indexOf(e) + 1) + ')');
+    e = e.parentElement;
+  }
+  return parts.join(' > ');
+};
 const elements = [root, ...root.querySelectorAll('*')].filter(visible);
 const nodes = elements.slice(0, 3000).map(e => ({
   tag:e.tagName.toLowerCase(), id:e.id, class:e.getAttribute('class') || '',
@@ -40,7 +50,20 @@ const nodes = elements.slice(0, 3000).map(e => ({
   own_text:[...e.childNodes].filter(n => n.nodeType === Node.TEXT_NODE)
     .map(n => n.textContent).join(' ').trim().slice(0, 500),
   value:['INPUT','TEXTAREA'].includes(e.tagName) && e.type !== 'password' ? e.value : null,
+  checked:e.tagName === 'INPUT' && ['checkbox','radio'].includes(e.type) ? e.checked : null,
+  disabled:'disabled' in e ? Boolean(e.disabled) : null,
   editable:e.isContentEditable, rect:rect(e),
+  editable_attribute:e.getAttribute('contenteditable'),
+  dom_attributes:Object.fromEntries([...e.attributes]
+    .filter(a => a.name.startsWith('data-') || a.name.startsWith('aria-') ||
+      ['title','draggable'].includes(a.name))
+    .map(a => [a.name, a.value])),
+  selector:path(e),
+  inline_style:e.getAttribute('style') || '',
+  paragraph_text:e.tagName === 'P' ? (e.innerText || '').slice(0, 10000) : null,
+  paragraph_text_truncated:e.tagName === 'P' && (e.innerText || '').length > 10000,
+  href:e.tagName === 'A' ? e.href : null,
+  target:e.tagName === 'A' ? e.getAttribute('target') : null,
   frame_src:e.tagName === 'IFRAME' ? e.getAttribute('src') : null
 }));
 const images = elements.filter(e => e.tagName === 'IMG').map(e => ({
@@ -50,7 +73,7 @@ const images = elements.filter(e => e.tagName === 'IMG').map(e => ({
 }));
 const backgrounds = elements.map(e => ({tag:e.tagName.toLowerCase(), id:e.id,
   class:e.getAttribute('class') || '', image:getComputedStyle(e).backgroundImage,
-  rect:rect(e)})).filter(e => e.image !== 'none');
+  selector:path(e), rect:rect(e)})).filter(e => e.image !== 'none');
 return {selector, url:location.href, title:document.title,
   text:(root.innerText || '').slice(0, 100000), text_truncated:(root.innerText || '').length > 100000,
   nodes, nodes_truncated:elements.length > 3000, images, backgrounds};
@@ -136,6 +159,7 @@ def type_active(sid, text):
 def observe(sid):
     return {'title': call('GET', session_path(sid, '/title')),
             'url': call('GET', session_path(sid, '/url')),
+            'handle': call('GET', session_path(sid, '/window')),
             'window': call('GET', session_path(sid, '/window/rect'))}
 
 
@@ -212,14 +236,21 @@ def self_test(sid, resume):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
-    for name in ('status', 'start', 'observe', 'reload', 'close'):
+    for name in ('status', 'start', 'observe', 'reload', 'close', 'windows'):
         sub.add_parser(name)
+    p = sub.add_parser('switch-window'); p.add_argument('handle')
+    p = sub.add_parser('focus'); p.add_argument('selector')
+    p = sub.add_parser('click-element'); p.add_argument('selector')
+    p.add_argument('--expect-text', required=True)
+    p = sub.add_parser('new-window'); p.add_argument('url')
     p = sub.add_parser('open'); p.add_argument('url')
     p = sub.add_parser('screenshot'); p.add_argument('filename', nargs='?', default='browser.png')
     p = sub.add_parser('click'); p.add_argument('x', type=int); p.add_argument('y', type=int)
     p = sub.add_parser('type'); p.add_argument('text')
-    p = sub.add_parser('key'); p.add_argument('name', choices=['Enter', 'Tab', 'Escape', 'Backspace'])
+    p = sub.add_parser('key'); p.add_argument('name', choices=['Enter', 'Tab', 'Escape', 'Backspace', 'SelectAll'])
     p = sub.add_parser('scroll'); p.add_argument('delta', type=int)
+    p.add_argument('--x', type=int, default=200)
+    p.add_argument('--y', type=int, default=200)
     p = sub.add_parser('text'); p.add_argument('selector', nargs='?', default='body')
     p = sub.add_parser('inspect'); p.add_argument('selector'); p.add_argument('filename')
     p.add_argument('--frame', help='CSS selector of one iframe in the top-level document')
@@ -237,9 +268,57 @@ def main():
             sid, reused = start()
             return {'reused': reused, **observe(sid)}
         sid = existing()
+        if args.command == 'new-window':
+            # Open a separate composition without discarding the current window.
+            if parse.urlsplit(args.url).scheme not in ('https', 'http'):
+                raise BrowserError('invalid URL', 'Use an observed HTTP(S) URL.')
+            previous = call('GET', session_path(sid, '/window'))
+            created = call('POST', session_path(sid, '/window/new'), {'type': 'tab'})
+            call('POST', session_path(sid, '/window'), {'handle': created['handle']})
+            navigate(sid, args.url)
+            return {'previous_handle': previous, **observe(sid)}
         if args.command == 'close':
             call('DELETE', session_path(sid)); STATE.unlink()
             return {'closed': True}
+        if args.command == 'windows':
+            current = call('GET', session_path(sid, '/window'))
+            windows = []
+            try:
+                for handle in call('GET', session_path(sid, '/window/handles')):
+                    call('POST', session_path(sid, '/window'), {'handle': handle})
+                    windows.append({'handle': handle, **observe(sid)})
+            finally:
+                call('POST', session_path(sid, '/window'), {'handle': current})
+            return {'current_handle': current, 'windows': windows}
+        if args.command == 'switch-window':
+            handles = call('GET', session_path(sid, '/window/handles'))
+            if args.handle not in handles:
+                raise BrowserError('unknown window', 'Observe available windows before switching.')
+            call('POST', session_path(sid, '/window'), {'handle': args.handle})
+            return observe(sid)
+        if args.command == 'focus':
+            matches = call('POST', session_path(sid, '/elements'),
+                           {'using': 'css selector', 'value': args.selector})
+            if len(matches) != 1:
+                raise BrowserError('ambiguous focus', 'Focus selector must match exactly one element.')
+            target = matches[0][ELEMENT_KEY]
+            call('POST', session_path(sid, '/element/' + target + '/click'), {})
+            active = call('GET', session_path(sid, '/element/active'))[ELEMENT_KEY]
+            if active != target:
+                raise BrowserError('focus mismatch', 'Clicked element is not the active element; do not type.')
+            return {'focused': True, 'selector': args.selector, **observe(sid)}
+        if args.command == 'click-element':
+            matches = call('POST', session_path(sid, '/elements'),
+                           {'using': 'css selector', 'value': args.selector})
+            if len(matches) != 1:
+                raise BrowserError('ambiguous click', 'Click selector must match exactly one element.')
+            target = session_path(sid, '/element/' + matches[0][ELEMENT_KEY])
+            if call('GET', target + '/text') != args.expect_text:
+                raise BrowserError('text mismatch', 'Element text changed; inspect again before clicking.')
+            if not call('GET', target + '/displayed') or not call('GET', target + '/enabled'):
+                raise BrowserError('unavailable element', 'Element must be displayed and enabled.')
+            call('POST', target + '/click', {})
+            return {'clicked': True, **observe(sid)}
         if args.command == 'open':
             navigate(sid, args.url)
         elif args.command == 'reload':
@@ -251,11 +330,24 @@ def main():
         elif args.command == 'type':
             type_active(sid, args.text)
         elif args.command == 'key':
-            key = {'Enter': '\ue007', 'Tab': '\ue004', 'Escape': '\ue00c', 'Backspace': '\ue003'}[args.name]
-            type_active(sid, key)
+            if args.name == 'SelectAll':
+                call('POST', session_path(sid, '/actions'), {'actions': [{
+                    'type': 'key', 'id': 'keyboard', 'actions': [
+                        {'type': 'keyDown', 'value': '\ue009'},
+                        {'type': 'keyDown', 'value': 'a'},
+                        {'type': 'keyUp', 'value': 'a'},
+                        {'type': 'keyUp', 'value': '\ue009'}]
+                }]})
+            else:
+                key = {'Enter': '\ue007', 'Tab': '\ue004', 'Escape': '\ue00c',
+                       'Backspace': '\ue003'}[args.name]
+                type_active(sid, key)
         elif args.command == 'scroll':
+            rect = call('GET', session_path(sid, '/window/rect'))
+            if not (0 <= args.x < rect['width'] and 0 <= args.y < rect['height']):
+                raise BrowserError('invalid coordinates', 'Scroll origin must be inside the screenshot.')
             call('POST', session_path(sid, '/actions'), {'actions': [{
-                'type': 'wheel', 'id': 'wheel', 'actions': [{'type': 'scroll', 'x': 200, 'y': 200,
+                'type': 'wheel', 'id': 'wheel', 'actions': [{'type': 'scroll', 'x': args.x, 'y': args.y,
                 'deltaX': 0, 'deltaY': args.delta, 'duration': 200, 'origin': 'viewport'}]
             }]})
         elif args.command == 'text':

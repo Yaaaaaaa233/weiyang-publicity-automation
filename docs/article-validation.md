@@ -66,3 +66,5 @@
 新增本机证据：`artifacts/xiumi-preview-basic.png`、`artifacts/xiumi-preview-image-before.png`、`artifacts/xiumi-image-reloaded.png`、`artifacts/xiumi-article-image-content.json`；报告 `artifacts/test-article-check.md`；当前检查点仍位于 `local/first-article/state.json`。
 
 `inspect` 与 `reload` 已加入浏览器工具；`check_snapshot.py` 在宿主机使用 Python 标准库生成报告。Windows 调用方式已记录，尚无 Windows 实机验收。代码通过 Git 分发，镜像和运行数据另行迁移。
+
+后续进展（同日）：已人工切换到使用者确认的日常接收账号，完成这一篇合成稿的跨账号转存验证，详见 [跨账号转存验证](transfer-validation.md)。上述未执行转存描述对应本记录早期的来源账号验证阶段。
