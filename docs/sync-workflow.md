@@ -81,6 +81,8 @@ python3 scripts/sync_workflow.py attach --run daily-example --current-window
 
 2026-10-04 在 9-21 历史预约上完成本工作流首次真实 `submit`：`prepare` 自动选入三篇（行序 7、6、8），16 项组合检查通过，`submit --execute` 点击一次「开始同步」，进度层出现到 6% 后消失并返回组合界面，未捕获明确的成功或失败提示，状态进入 `awaiting_confirmation`。使用者在公众号草稿箱核对内容、顺序和封面无误后 `confirm --result ok`，任务 `569eb0ac814040208f106e5ed235dc3a` 记为 `completed`、版本 26、已提交次数 1。该结论来自使用者核验，不是脚本推断的同步成功。
 
-同一轮暴露一个尚未修复的缺陷：脚本沿用快照中的绝对 `nth-of-type` 路径作为选择器，而秀米 `#/wxpack` 页在渲染过程中会增删顶层 `div`，使 `body > div:nth-of-type(N)` 及其后续链路失效。实测该选择器在失败时刻匹配 0 个元素（同页 `input[placeholder="输入关键词后按回车键"]` 稳定唯一）。两次失败分别表现为 `ambiguous focus`（搜索框）和 `ambiguous click`（点击元素），均由 `prepare --resume` 核对已选前缀后补齐剩余篇目恢复，没有重放任何有副作用的动作。修复方向是动作时重新解析元素或改用属性选择器，尚未实施，也未补充对应测试。
+同一轮暴露一个缺陷（**2026-10-06 已修复**）：脚本沿用快照中的绝对 `nth-of-type` 路径作为选择器，而秀米 `#/wxpack` 页在渲染过程中会增删顶层 `div`，使 `body > div:nth-of-type(N)` 及其后续链路失效。实测该选择器在失败时刻匹配 0 个元素（同页 `input[placeholder="输入关键词后按回车键"]` 稳定唯一）。两次失败分别表现为 `ambiguous focus`（搜索框）和 `ambiguous click`（点击元素），均由 `prepare --resume` 核对已选前缀后补齐剩余篇目恢复，没有重放任何有副作用的动作。
+
+修复采用「属性选择器优先」：`scripts/browser.py` 的 inspect 脚本为每个节点新增 `stable_selector` 字段——依次尝试 `#id`、`[data-testid]`、`[data-id]`、`[aria-label]`、`[placeholder]`、`[name]`、`[title]`、`[alt]` 及其他 `data-*`，**每个候选都要求 `querySelectorAll` 恰好匹配 1 个元素**，全部不唯一时才回退到原位置路径；原 `selector` 字段语义不变，已存快照仍可读。`scripts/sync_workflow.py` 新增 `target(node)`，动作点（`click-element`、`focus` 搜索框、`focus` 标题输入、结果稳定性比较）一律优先取 `stable_selector`，缺失时回退。回归测试 `test_search_focus_prefers_stable_selector_over_stale_positional_path` 复现「位置路径已失效、属性选择器仍唯一」并断言传给浏览器的是属性选择器；把 `target` 还原成旧行为时该测试会失败，确认有效。尚未在真实秀米页面上复测一次完整 `prepare`。
 
 历史转存验收：[公众号同步验证](wechat-sync-validation.md)。

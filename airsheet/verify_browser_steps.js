@@ -23,7 +23,7 @@ function mock(actual) {
   return{tab,calls};
 }
 (async()=>{
-  const expected='const SCRIPT_VERSION = "1.1";\nreturn {};';
+  const expected='const SCRIPT_VERSION = "1.2";\nreturn {};';
   let m=mock(expected+'\r\n');await startWpsDayRead(m.tab,expected);assert.equal(m.calls.runs,1);assert.equal(m.calls.sharedSelections,1);
   m=mock(expected+'\n// altered');await assert.rejects(startWpsDayRead(m.tab,expected),/shared_source_changed/);assert.equal(m.calls.runs,0);
   m=mock(expected);await assert.rejects(startWpsDayRead(m.tab,expected,'2026-09-21'),/historical_parameter_ui_not_configured/);assert.equal(m.calls.sharedSelections,0);

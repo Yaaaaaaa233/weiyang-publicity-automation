@@ -49,6 +49,28 @@ const path = e => {
   }
   return parts.join(' > ');
 };
+// `path` is positional: xiumi's #/wxpack re-renders its top-level nodes while a
+// selection is in progress, so a cached path can later match nothing or the wrong
+// element ('ambiguous focus' / 'ambiguous click'). Prefer an attribute that pins
+// this exact element, and only fall back to the positional path when none is unique.
+const escapeValue = v => String(v).replace(/"/g, '\\"');
+const stablePath = e => {
+  const tag = e.tagName.toLowerCase();
+  const candidates = [];
+  if (e.id) candidates.push('#' + ((window.CSS && CSS.escape) ? CSS.escape(e.id) : e.id));
+  ['data-testid', 'data-id', 'aria-label', 'placeholder', 'name', 'title', 'alt'].forEach(a => {
+    const value = e.getAttribute && e.getAttribute(a);
+    if (value) candidates.push(tag + '[' + a + '="' + escapeValue(value) + '"]');
+  });
+  if (e.attributes) [...e.attributes].forEach(a => {
+    if (a.name.indexOf('data-') === 0 && !['data-testid', 'data-id'].includes(a.name))
+      candidates.push(tag + '[' + a.name + '="' + escapeValue(a.value) + '"]');
+  });
+  for (const candidate of candidates) {
+    try { if (document.querySelectorAll(candidate).length === 1) return candidate; } catch (error) {}
+  }
+  return path(e);
+};
 const elements = [root, ...root.querySelectorAll('*')].filter(visible);
 const nodes = elements.slice(0, 3000).map(e => ({
   tag:e.tagName.toLowerCase(), id:e.id, class:e.getAttribute('class') || '',
@@ -70,6 +92,7 @@ const nodes = elements.slice(0, 3000).map(e => ({
       ['title','draggable'].includes(a.name))
     .map(a => [a.name, a.value])),
   selector:path(e),
+  stable_selector:stablePath(e),
   inline_style:e.getAttribute('style') || '',
   paragraph_text:e.tagName === 'P' ? (e.innerText || '').slice(0, 10000) : null,
   paragraph_text_truncated:e.tagName === 'P' && (e.innerText || '').length > 10000,

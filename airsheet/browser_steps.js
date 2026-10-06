@@ -4,7 +4,7 @@
 async function startWpsDayRead(tab, source, requestedDate = "") {
   if (requestedDate && !/^\d{4}-\d{2}-\d{2}$/.test(requestedDate)) throw new Error("invalid_date");
   if (requestedDate) throw new Error("historical_parameter_ui_not_configured");
-  if (!source.includes('const SCRIPT_VERSION = "1.1";')) throw new Error("wrong_shared_source");
+  if (!source.includes('const SCRIPT_VERSION = "1.2";')) throw new Error("wrong_shared_source");
   if (!(await tab.playwright.locator('iframe#excelIde').count())) {
     await tab.playwright.getByRole('button', {name:'效率', exact:true}).click();
     await tab.getAXState({emit:false});

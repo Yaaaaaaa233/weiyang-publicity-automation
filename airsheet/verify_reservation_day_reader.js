@@ -27,4 +27,18 @@ broken=sheet();broken.Cells=()=>{throw new Error('read_failed');};assert.equal(r
 broken=sheet();const old=broken.Cells;broken.Cells=(r,c)=>{const cell=old(r,c);if(r===6)cell.MergeArea.Rows.Count=100;return cell;};assert.equal(run([broken]).error,'unexpected_date_merge');
 broken=sheet();broken.Cells=(r,c)=>{const cell=old(r,c);if(r===14&&c===1)cell.Text='####';return cell;};assert.equal(run([broken]).error,'unrecognized_date_cell');
 assert.equal(run([sheet()],'2026-02-30').error,'invalid_date');
-console.log('8 AirScript day-reader scenarios passed');
+// 工作表配额：周表数量才是真实上限（每周新增一张表），平台内部表不占配额。
+// 只设上限不设下限——命名不符时仍应走正常扫描并报 date_not_found，而不是误报配额错误。
+function blank(name) {
+  return {Name:name,UsedRange:{Row:1,Rows:{Count:65}},Cells(){return {Text:'',
+    MergeArea:{Row:1,Column:1,Rows:{Count:1},Columns:{Count:1}}};}};
+}
+function weeks(n,withDateAt) {
+  const out=[];for(let i=1;i<=n;i++)out.push(i===withDateAt?sheet('第'+i+'周'):blank('第'+i+'周'));
+  return out;
+}
+assert.equal(run(weeks(60,60)).ok,true);
+assert.equal(run(weeks(60,60).concat([blank('WpsReserved_CellImgList'),blank('WpsReserved_CellImgList2')])).ok,true);
+assert.equal(run(weeks(61,61)).error,'week_sheet_limit');
+assert.equal(run(weeks(60,60).concat(Array.from({length:70},(_,i)=>blank('extra'+i)))).error,'sheet_scan_limit');
+console.log('12 AirScript day-reader scenarios passed');

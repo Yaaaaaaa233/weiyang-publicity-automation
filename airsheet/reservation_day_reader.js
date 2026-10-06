@@ -1,7 +1,7 @@
-// Shared read-only script v1.1. Missing Context.argv.date means today in Shanghai.
+// Shared read-only script v1.2. Missing Context.argv.date means today in Shanghai.
 // Configure the optional date field in the WPS parameter view; never rewrite
 // this shared source to run historical tests. Personal v1.0 is frozen in archive/.
-const SCRIPT_VERSION = "1.1";
+const SCRIPT_VERSION = "1.2";
 const REQUESTED_DATE = (typeof Context !== 'undefined' && Context && Context.argv && Context.argv.date) || "";
 const started = new Date();
 const requested = REQUESTED_DATE || new Date(started.getTime()+8*3600000).toISOString().slice(0,10);
@@ -19,7 +19,15 @@ let result;
 try {
   if(!/^\d{4}-\d{2}-\d{2}$/.test(requested) || dateOf(requested)!==requested) throw new Error("invalid_query_date");
   const count=Application.Sheets.Count;
-  if(!(count>0 && count<=12)) throw new Error("sheet_scan_limit");
+  // 两级守卫都只用于拦截异常工作簿，**不作为业务增长上限**。
+  // 该表格每周新增一张周表且旧表长期保留（2026-10 实测已有四张），
+  // 因此配额必须远高于当前周数，否则会变成「到某个日期就整体读不出」的定时故障：
+  // 旧上限 12 在 2026-11-30（第12周）即触发。平台内部表
+  // （如 WpsReserved_CellImgList）不计入周表配额。
+  if(!(count>0 && count<=120)) throw new Error("sheet_scan_limit");
+  let weekSheets=0;
+  for(let i=1;i<=count;i++) if(/^第.+周$/.test(String(Application.Sheets.Item(i).Name))) weekSheets++;
+  if(weekSheets>60) throw new Error("week_sheet_limit");
   const scanned=[];
   const matches=[];
   for(let i=1;i<=count;i++) {

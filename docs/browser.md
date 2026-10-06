@@ -47,6 +47,8 @@ py scripts/browserctl.py start
 | `click 300 250` | 在页面截图对应的坐标点击 |
 | `type '测试文字'` | 在当前焦点输入文字；避免通过命令行传入真实密码 |
 | `key Enter` | 按 Enter、Tab、Escape、Backspace；`SelectAll` 在当前焦点执行 Ctrl+A（专用浏览器是 Linux） |
+
+快照节点同时给出 `selector` 与 `stable_selector`。`selector` 是绝对 `nth-of-type` 位置路径，只反映**快照当时**的 DOM；页面在动作前重渲染时它会失效（秀米 `#/wxpack` 会增删顶层 `div`）。`stable_selector` 优先用元素自身的 `#id`/`data-*`/`aria-label`/`placeholder`/`name`/`title`/`alt` 定位，且每个候选都要求全文档唯一，否则回退为位置路径。**需要跨动作复用的选择器（缓存进计划、稍后再执行）应使用 `stable_selector`**；`focus` 与 `click-element` 都要求恰好匹配一个元素，不唯一即报错而不猜测。
 | `scroll 500 --x 1000 --y 450` | 在指定坐标所在区域滚动；负数向上；默认原点 200,200，可能落在模板库 |
 | `text body` | 读取指定 CSS 元素的可见文字 |
 | `inspect body current.json` | 将选定区域的渲染文本、节点和图片信息取回本机 JSON，只在命令结果中输出路径与统计 |

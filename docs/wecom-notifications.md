@@ -47,7 +47,7 @@ completion必须是同日期、同run_id的真实检查点摘要，字段示例�
 
 formatted_articles需覆盖全部预约行；source_id须与已匹配候选一致，draft_id不得重复。同步列表须与头条/行序对应的副本完全一致。sync.status接受`submitted`或`confirmed`，后者confirmed_by仅接受有实际证据的`user`或`platform`。生成器校验字段、映射、标题差异和证据文件存在；证据的实际内容仍需执行者核对，不能把手填true或创建空文件作为真实验收。未完成或中断的部分结果仍用核对后的私有message-file如实报告。
 
-最新修改通过74项Python测试；本轮未发送真实消息。
+最新修改通过96项Python测试；本轮未发送真实消息。
 
 新增宿主机脚本 `scripts/notify_wecom.py`，Python 3.9+ 标准库实现；Windows 将 `python3` 换为 `py`。实际群和 Webhook 放本机私有配置，公开仓库不记录接收群名、凭据、真实预约或消息正文。
 

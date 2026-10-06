@@ -114,6 +114,42 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(browser.commands[0][0], 'click-element')
         self.assertEqual(sum(args[0] == 'type' for args in browser.commands), 1)
 
+    def test_search_focus_prefers_stable_selector_over_stale_positional_path(self):
+        """#/wxpack re-renders mid-selection, so a cached :nth-of-type path goes stale.
+
+        This reproduces the documented `ambiguous focus` failure: the positional path
+        captured by the snapshot no longer identifies the search box by action time,
+        while the attribute selector still matches exactly one element.
+        """
+        plan = plan_input()
+        collapsed = snapshot_with_count(0, plan)
+        collapsed['nodes'].append({'tag': 'span', 'class': 'tn-tpl-search-icon',
+                                   'selector': 'body > aside > span', 'own_text': ''})
+        opened = copy.deepcopy(collapsed)
+        opened['nodes'].append({'tag': 'input', 'class': 'form-control',
+                                'placeholder': '输入关键词后按回车键',
+                                'selector': 'body > div:nth-of-type(3) > aside > input',
+                                'stable_selector': 'input[placeholder="输入关键词后按回车键"]'})
+        matched = copy.deepcopy(opened)
+        matched['nodes'].extend([
+            {'tag': 'div', 'class': 'article-container', 'selector': 'body > aside > div'},
+            {'tag': 'div', 'class': 'title', 'selector': 'body > aside > div > div'},
+            {'tag': 'div', 'class': 'inner', 'selector': 'body > aside > div > div > div', 'own_text': '测试稿1'}])
+        class Search(w.Browser):
+            def __init__(self): self.frames = iter((collapsed, opened, opened, matched, matched)); self.commands = []
+            def snapshot(self): return next(self.frames)
+            def command(self, *args): self.commands.append(args)
+        browser = Search()
+        with patch.object(w.time, 'sleep'):
+            browser.search('测试稿1')
+        focuses = [args[1] for args in browser.commands if args[0] == 'focus']
+        self.assertEqual(focuses, ['input[placeholder="输入关键词后按回车键"]'])
+
+    def test_target_falls_back_for_snapshots_without_stable_selector(self):
+        self.assertEqual(w.target({'selector': 'body > a'}), 'body > a')
+        self.assertEqual(w.target({'selector': 'body > a', 'stable_selector': '#x'}), '#x')
+        self.assertEqual(w.target({'selector': 'body > a', 'stable_selector': None}), 'body > a')
+
     def test_existing_lock_is_not_removed_or_ignored(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / 'workflow.lock'

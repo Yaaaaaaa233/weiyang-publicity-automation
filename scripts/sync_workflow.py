@@ -92,6 +92,18 @@ def runner_lock(path):
             path.unlink()
 
 
+def target(node):
+    """Prefer a stable attribute selector over a cached positional path.
+
+    Snapshots are taken before an action, and xiumi's #/wxpack re-renders its
+    top-level nodes while a selection is in progress. A cached ``:nth-of-type``
+    chain can therefore match nothing (``ambiguous focus``) or the wrong element
+    by action time; ``stable_selector`` pins the element by its own attributes.
+    Older snapshots without the field keep working through the fallback.
+    """
+    return node.get('stable_selector') or node['selector']
+
+
 def complete(snapshot):
     if snapshot.get('nodes_truncated') is not False or snapshot.get('text_truncated') is not False or not snapshot.get('text'):
         raise Stop('Snapshot is incomplete; inspect again instead of acting.')
@@ -202,7 +214,7 @@ class Browser:
             time.sleep(0.5)
 
     def click_text(self, node, text):
-        return self.command('click-element', node['selector'], '--expect-text', text)
+        return self.command('click-element', target(node), '--expect-text', text)
 
     def menu(self, plan):
         snapshot = self.snapshot()
@@ -230,7 +242,7 @@ class Browser:
         # one exact complete title, never fuzzy matching or the first returned card.
         queries = search_queries(title)
         for query in queries:
-            self.command('focus', control['selector'])
+            self.command('focus', target(control))
             self.command('key', 'SelectAll')
             self.command('type', query)
             self.command('key', 'Enter')
@@ -244,7 +256,7 @@ class Browser:
                     time.sleep(0.5)
                     second = self.snapshot()
                     settled = library_title(second, title)
-                    if settled['selector'] != matches[0]['selector']:
+                    if target(settled) != target(matches[0]):
                         raise Stop('Library results are still changing; inspect before selecting.')
                     return settled
                 if time.monotonic() >= deadline:
@@ -268,7 +280,7 @@ def assemble(browser, plan, record_action):
         if control['value'] != articles[index]['source_title']:
             raise Stop('Title changed unexpectedly; do not overwrite it.')
         record_action('title_edit_intent', index)
-        browser.command('focus', control['selector'])
+        browser.command('focus', target(control))
         browser.command('key', 'SelectAll')
         browser.command('type', expected)
         browser.command('key', 'Tab')
