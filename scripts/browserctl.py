@@ -20,7 +20,9 @@ def main():
     # The CLI also launches its credential helper; both must be discoverable.
     env['PATH'] = str(Path(docker).resolve().parent) + os.pathsep + env.get('PATH', '')
     command = [docker, 'compose', 'exec', '-T', 'browser', 'python3', '/opt/project/browser.py']
-    process = subprocess.run(command + sys.argv[1:], cwd=ROOT, env=env, capture_output=True)
+    lease = env.get('WEIYANG_BROWSER_LEASE')
+    arguments = (['--lease-token', lease] if lease else []) + sys.argv[1:]
+    process = subprocess.run(command + arguments, cwd=ROOT, env=env, capture_output=True)
     if not process.stdout:
         raise RuntimeError(process.stderr.decode('utf-8', errors='replace').strip() or 'Browser command failed.')
     data = json.loads(process.stdout.decode('utf-8'))

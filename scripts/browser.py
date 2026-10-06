@@ -5,14 +5,21 @@ lock; this prevents simultaneous command execution, not competing task ownership
 """
 import argparse
 import base64
-import fcntl
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # Windows can import pure helpers; commands still require the Linux container.
 import json
+import os
+import subprocess
+import time
 from pathlib import Path
 import sys
 from urllib import error, parse, request
 
 ROOT = Path('/home/seluser/profile')
 STATE = ROOT / 'session.json'
+LEASE = ROOT / 'workflow-lease.json'
 ENDPOINT = 'http://127.0.0.1:4444'
 ELEMENT_KEY = 'element-6066-11e4-a52e-4f735466cecf'
 FIXTURE = 'file:///opt/project/fixtures/browser-check.html'
@@ -45,10 +52,14 @@ const path = e => {
 const elements = [root, ...root.querySelectorAll('*')].filter(visible);
 const nodes = elements.slice(0, 3000).map(e => ({
   tag:e.tagName.toLowerCase(), id:e.id, class:e.getAttribute('class') || '',
+  parent_class:e.parentElement ? e.parentElement.getAttribute('class') || '' : '',
+  parent_tag:e.parentElement ? e.parentElement.tagName.toLowerCase() : null,
   role:e.getAttribute('role'), label:e.getAttribute('aria-label'),
   placeholder:e.getAttribute('placeholder'), type:e.getAttribute('type'),
   own_text:[...e.childNodes].filter(n => n.nodeType === Node.TEXT_NODE)
     .map(n => n.textContent).join(' ').trim().slice(0, 500),
+  rendered_text:(e.innerText || '').slice(0, 12000),
+  rendered_text_truncated:(e.innerText || '').length > 12000,
   value:['INPUT','TEXTAREA'].includes(e.tagName) && e.type !== 'password' ? e.value : null,
   checked:e.tagName === 'INPUT' && ['checkbox','radio'].includes(e.type) ? e.checked : null,
   disabled:'disabled' in e ? Boolean(e.disabled) : null,
@@ -212,6 +223,81 @@ def click(sid, x, y):
     }]})
 
 
+def enter_frame(sid, frame):
+    call('POST', session_path(sid, '/frame'), {'id': None})
+    if frame:
+        matches = call('POST', session_path(sid, '/elements'), {'using':'css selector', 'value':frame})
+        if len(matches) != 1:
+            raise BrowserError('ambiguous frame', 'Expected one frame.')
+        call('POST', session_path(sid, '/frame'), {'id':matches[0]})
+
+
+def workflow_lease(command, token):
+    """Called under command.lock. Stale leases require explicit owner recovery."""
+    if command == 'lease-acquire':
+        if not token or len(token) < 16:
+            raise BrowserError('lease token required', 'Use a unique workflow token.')
+        if LEASE.exists():
+            raise BrowserError('workflow busy', 'An existing workflow lease requires inspection; do not take over.')
+        LEASE.write_text(json.dumps({'token':token, 'created_at':time.time()}))
+        return {'acquired':True}
+    if command == 'lease-release':
+        if not LEASE.exists() or json.loads(LEASE.read_text())['token'] != token:
+            raise BrowserError('wrong lease owner', 'Only the current owner can release.')
+        LEASE.unlink()
+        return {'released':True}
+    if LEASE.exists() and json.loads(LEASE.read_text())['token'] != token:
+        raise BrowserError('workflow busy', 'Browser reserved by a workflow; do not operate concurrently.')
+
+
+def key_action(sid, name):
+    if name in ('SelectAll', 'Copy'):
+        letter = 'a' if name == 'SelectAll' else 'c'
+        call('POST', session_path(sid, '/actions'), {'actions':[{
+            'type':'key','id':'keyboard','actions':[
+                {'type':'keyDown','value':'\ue009'},{'type':'keyDown','value':letter},
+                {'type':'keyUp','value':letter},{'type':'keyUp','value':'\ue009'}]}]})
+    else:
+        type_active(sid, {'Enter':'\ue007','Tab':'\ue004','Escape':'\ue00c','Backspace':'\ue003'}[name])
+
+
+def copy_editor(sid, selector, name, frame):
+    if not frame or selector != 'textarea.inputarea' or Path(name).name != name or not name.endswith('.json'):
+        raise BrowserError('invalid editor copy', 'Only the observed Monaco editor is supported.')
+    enter_frame(sid, frame)
+    try:
+        elements = call('POST', session_path(sid, '/elements'), {'using':'css selector','value':selector})
+        if len(elements) != 1:
+            raise BrowserError('ambiguous editor', 'Expected exactly one source editor.')
+        target = elements[0][ELEMENT_KEY]
+        # Preserve the editor and use normal keys; xclip reads only this container's clipboard.
+        # Monaco's 1px textarea is covered; click its rendered code surface instead.
+        surfaces = call('POST', session_path(sid, '/elements'), {'using':'css selector','value':'.view-lines'})
+        if len(surfaces) != 1:
+            raise BrowserError('ambiguous editor surface','Expected one rendered source surface.')
+        call('POST', session_path(sid, '/element/' + surfaces[0][ELEMENT_KEY] + '/click'), {})
+        if call('GET',session_path(sid,'/element/active'))[ELEMENT_KEY] != target:
+            raise BrowserError('focus mismatch','Source editor is not focused.')
+        marker = 'weiyang-copy-' + str(time.time_ns())
+        subprocess.run(['xclip','-selection','clipboard'],input=marker.encode(),check=True,timeout=5,
+                       stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        key_action(sid, 'SelectAll'); key_action(sid, 'Copy')
+        deadline = time.monotonic()+5
+        while True:
+            value = subprocess.run(['xclip','-selection','clipboard','-o'],capture_output=True,check=True,timeout=5).stdout.decode('utf-8')
+            if value != marker:
+                break
+            if time.monotonic() >= deadline:
+                raise BrowserError('copy pending', 'Editor copy did not produce fresh text.')
+            time.sleep(.1)
+        if len(value) > 100000:
+            raise BrowserError('oversized source', 'Source exceeded supported bounds.')
+        (Path('/opt/artifacts')/name).write_text(json.dumps({'source':value},ensure_ascii=False),encoding='utf-8')
+        return {'artifact':'artifacts/'+name,'source_length':len(value)}
+    finally:
+        enter_frame(sid,None)
+
+
 def self_test(sid, resume):
     navigate(sid, FIXTURE)
     if resume:
@@ -235,19 +321,24 @@ def self_test(sid, resume):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--lease-token', default=None)
     sub = parser.add_subparsers(dest='command', required=True)
-    for name in ('status', 'start', 'observe', 'reload', 'close', 'windows'):
+    for name in ('status', 'start', 'observe', 'reload', 'close', 'windows', 'lease-acquire', 'lease-release'):
         sub.add_parser(name)
     p = sub.add_parser('switch-window'); p.add_argument('handle')
     p = sub.add_parser('focus'); p.add_argument('selector')
+    p.add_argument('--frame')
     p = sub.add_parser('click-element'); p.add_argument('selector')
     p.add_argument('--expect-text', required=True)
+    p.add_argument('--frame')
+    p = sub.add_parser('copy-editor'); p.add_argument('selector'); p.add_argument('filename'); p.add_argument('--frame',required=True)
     p = sub.add_parser('new-window'); p.add_argument('url')
     p = sub.add_parser('open'); p.add_argument('url')
     p = sub.add_parser('screenshot'); p.add_argument('filename', nargs='?', default='browser.png')
     p = sub.add_parser('click'); p.add_argument('x', type=int); p.add_argument('y', type=int)
     p = sub.add_parser('type'); p.add_argument('text')
     p = sub.add_parser('key'); p.add_argument('name', choices=['Enter', 'Tab', 'Escape', 'Backspace', 'SelectAll'])
+    p.add_argument('--frame')
     p = sub.add_parser('scroll'); p.add_argument('delta', type=int)
     p.add_argument('--x', type=int, default=200)
     p.add_argument('--y', type=int, default=200)
@@ -256,6 +347,8 @@ def main():
     p.add_argument('--frame', help='CSS selector of one iframe in the top-level document')
     p = sub.add_parser('self-test'); p.add_argument('--resume', action='store_true')
     args = parser.parse_args()
+    if fcntl is None:
+        raise BrowserError('unsupported platform','Run browser commands inside the Linux container via browserctl.py.')
     ROOT.mkdir(parents=True, exist_ok=True)
     with (ROOT / 'command.lock').open('a') as lock:
         try:
@@ -264,10 +357,18 @@ def main():
             raise BrowserError('busy', 'Another browser command is running.') from exc
         if args.command == 'status':
             return call('GET', '/status')
+        lease_result = workflow_lease(args.command, args.lease_token)
+        if args.command in ('lease-acquire','lease-release'):
+            return lease_result
         if args.command == 'start':
             sid, reused = start()
             return {'reused': reused, **observe(sid)}
         sid = existing()
+        enter_frame(sid,None)
+        if args.command == 'copy-editor':
+            return copy_editor(sid,args.selector,args.filename,args.frame)
+        if args.command in ('focus','click-element','key') and args.frame:
+            enter_frame(sid,args.frame)
         if args.command == 'new-window':
             # Open a separate composition without discarding the current window.
             if parse.urlsplit(args.url).scheme not in ('https', 'http'):
@@ -306,6 +407,7 @@ def main():
             active = call('GET', session_path(sid, '/element/active'))[ELEMENT_KEY]
             if active != target:
                 raise BrowserError('focus mismatch', 'Clicked element is not the active element; do not type.')
+            enter_frame(sid,None)
             return {'focused': True, 'selector': args.selector, **observe(sid)}
         if args.command == 'click-element':
             matches = call('POST', session_path(sid, '/elements'),
@@ -318,6 +420,7 @@ def main():
             if not call('GET', target + '/displayed') or not call('GET', target + '/enabled'):
                 raise BrowserError('unavailable element', 'Element must be displayed and enabled.')
             call('POST', target + '/click', {})
+            enter_frame(sid,None)
             return {'clicked': True, **observe(sid)}
         if args.command == 'open':
             navigate(sid, args.url)
@@ -330,18 +433,8 @@ def main():
         elif args.command == 'type':
             type_active(sid, args.text)
         elif args.command == 'key':
-            if args.name == 'SelectAll':
-                call('POST', session_path(sid, '/actions'), {'actions': [{
-                    'type': 'key', 'id': 'keyboard', 'actions': [
-                        {'type': 'keyDown', 'value': '\ue009'},
-                        {'type': 'keyDown', 'value': 'a'},
-                        {'type': 'keyUp', 'value': 'a'},
-                        {'type': 'keyUp', 'value': '\ue009'}]
-                }]})
-            else:
-                key = {'Enter': '\ue007', 'Tab': '\ue004', 'Escape': '\ue00c',
-                       'Backspace': '\ue003'}[args.name]
-                type_active(sid, key)
+            key_action(sid,args.name)
+            enter_frame(sid,None)
         elif args.command == 'scroll':
             rect = call('GET', session_path(sid, '/window/rect'))
             if not (0 <= args.x < rect['width'] and 0 <= args.y < rect['height']):

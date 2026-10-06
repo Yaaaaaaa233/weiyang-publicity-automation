@@ -9,6 +9,8 @@
 
 宿主机已提供 SQLite 任务账本、报告和 JSON 交接命令，见 `docs/tasks.md`。这些工具尚未组成独立模型执行循环，也没有容器化为 `workflow` 服务。
 
+本机当前 Codex 聊天已配置每天 15:10 的定时接续（原 17:00 已调整），agent 负责实时预约读取及平台操作，`scripts/daily_check.py` 负责收稿完整性判定。`scripts/notify_wecom.py` 的企业微信单向提醒已实际接通，不包含消息输入或交互任务入口。运行与迁移说明见 `docs/daily-run.md` 和 `docs/wecom-notifications.md`；首次无人值守仍待验收。桌面 app 定时入口不随 Git 自动迁移，换执行节点时须先停用旧入口。
+
 BOT 后续作为可选入口加入，消息转换为持久化任务。服务在 Docker 内部网络通信；人工入口按需要仅绑定宿主机本地地址。
 
 模型负责理解与决策；容器中的程序运行脚本和操作浏览器。当前桌面聊天中的 Computer Use 不自动成为容器内工具，需要独立的浏览器工具接口及 agent 接入适配。

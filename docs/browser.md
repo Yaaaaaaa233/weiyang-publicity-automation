@@ -1,6 +1,6 @@
 # 专用浏览器：启动、验证与交接
 
-当前实现只提供浏览器环境和操作命令。尚未接入独立模型执行循环、定时任务或 BOT。
+当前实现提供浏览器环境和操作命令，尚未接入独立模型执行循环或 BOT。当前 Codex 聊天另已配置每日定时接续，由桌面 agent 调用这些命令；首次无人值守运行待验收，见 `docs/daily-run.md`。
 
 ## 启动
 
@@ -52,8 +52,12 @@ py scripts/browserctl.py start
 | `inspect body current.json` | 将选定区域的渲染文本、节点和图片信息取回本机 JSON，只在命令结果中输出路径与统计 |
 | `inspect .tn-article-body article.json --frame iframe.preview-frame` | 读取当前秀米预览 iframe 中的正文；选择器须按实际页面重新核对 |
 | `close` | 正常结束浏览器会话，保留数据 |
+| `lease-acquire` / `lease-release` | 配合全局 `--lease-token` 保持/释放整段操作的容器租约；统一入口自动管理 |
+| `copy-editor textarea.inputarea source.json --frame iframe#excelIde` | 对已观察的唯一编辑器执行正常全选/复制，核对焦点后将完整源码落盘；需要镜像内 xclip |
 
 坐标以 WebDriver 的页面截图为准。人工查看入口的画面包含浏览器工具栏，可能缩放，不能直接混用两种坐标。页面或焦点发生变化后重新观察。
+
+2026-10-05：新增 `rendered_text`（含截断标记）、DOM 直接提供的父节点 class/tag，用于读取完整卡片及当前分页/标签状态。focus、click-element 和 key 支持已观察的唯一 `--frame`，命令前重置顶层上下文。专用浏览器的租约文件在命名卷内，租约存在时没有对应 token 的操作命令拒绝执行；`status` 仍可读。它不阻止手动 noVNC 操作，不会自动清除遗留租约，也不构成跨电脑锁。统一入口用法见 [daily-runner.md](daily-runner.md)。
 
 `observe` 另返回当前窗口 `handle`，其有效性限于当前会话；跨会话或换设备后必须重新关联。`new-window`、文本核对点击已在 Mac 自动组合历史四篇时实际使用。空文本点击只用于已观察到的唯一搜索图标，不认证稿件身份；新字段和命令尚未在 Windows 验收。
 
@@ -121,3 +125,10 @@ python3 scripts/browserctl.py self-test --resume
 2026-10-03 真实副本验证补充：`inspect` 记录节点内联样式和完整段落渲染文本（段落上限 10000 字并标记截断）。判断空段落使用段落全文，不能只检查 `own_text`；编辑器快速输入占位与文章预览分开核对。`SelectAll` 已在本机副本标题输入验收；指定滚动原点已用于文章区和预览 iframe。新增字段和操作尚未在 Windows 验收。
 
 同日合成修正验证新增节点当次 CSS 路径及 `contenteditable` 属性，用于重新定位输入目标。路径随 DOM 改动而变，不是永久标识；`focus` 不认证稿件身份或内容。窗口观察已在本专用会话执行，focus 正向输入及缺失/歧义两项负向保护已本机验收。Backspace 可能合并组件或删除相邻文字，顶层空组件改用明确工具栏删除入口。详见[合成修正验证](format-correction-validation.md)。
+
+
+## 容器重建后的残留配置锁
+
+2026-10-05 Windows 实机更换镜像并保留浏览器卷后，Chromium 创建会话报 `DevToolsActivePort file does not exist`。诊断发现 `chromium/SingletonLock`、`SingletonCookie`、`SingletonSocket` 仍指向已经不存在的旧容器；移除这三个已确认失效的符号链接后，新会话实际启动成功，配置卷和登录数据保留。
+
+该错误本身不足以判定为残留锁。先检查容器日志、资源、实际浏览器进程和链接指向，确认无活跃会话或业务执行者；只有确认锁失效才处理。不得删除整个 profile、Cookie 数据、任务租约或仍被活跃浏览器使用的锁。本次属于人工监督恢复，尚未加入自动清锁逻辑。

@@ -1,0 +1,92 @@
+# 预约读取、秀米检索与统一检查入口
+
+2026-10-05 已封装路线图前三项：`wps_read.py`、`xiumi_scan.py`、`daily_run.py`。通过专用 Docker 浏览器的正常页面操作读取数据，宿主机 Python 连接解析、账本和通知。不需要 agent 手工复制日志到文本编辑器。本文为这三个入口的当前说明；早期人工监督步骤作为历史记录保留。
+
+## 配置与首次准备
+
+宿主机需要 Python 3.9+、Docker Compose 和可用的专用浏览器。新构建按 `docs/browser.md` 操作；镜像新增 Ubuntu 官方 `xclip` 包，用于专用 Linux 浏览器内正常复制共享脚本源码。不得读取日常浏览器 Cookie。WPS 和秀米登录、验证码及协议由使用者完成。
+
+将 `fixtures/daily-runner-config.example.json` 复制为 `local/daily-runner/config.json`，填写已观察的预约表地址、秀米稿件库地址和常用账号页面昵称。配置属于本机私有数据，不进入 Git。已有本机配置保留，不以样例覆盖。企业微信沿用 `.env` 和私有通知状态，见 `docs/wecom-notifications.md`；预览模式无需 Webhook。
+
+`reviewed_instructions_sha256` 默认为空，表示业务说明尚未审阅。agent 阅读本次真实说明后，才可把其指纹写入私有配置。只对完全一致的说明复用审阅结果；说明变化、未知备注、头条缺失或多头条仍阻断。指纹不是新的授权，也不能消除预约数据自身的冲突。
+
+## 统一入口
+
+在仓库根目录执行；Windows PowerShell 将 `python3` 改为 `py`。每一次真实检查使用包含日期的唯一运行标识，接续同一次检查则复用原标识。
+
+```sh
+python3 scripts/daily_run.py --config local/daily-runner/config.json \
+  --run check-YYYYMMDD-UNIQUE --notify preview
+```
+
+入口按北京时间当天读取 WPS、检索秀米、运行完整性检查、保存通知预览、写账本并导出交接。无预约跳过秀米检索，也生成结果消息。标准输出只含状态、任务和私有路径，不打印实际篇目。退出码 0 表示无预约或允许开始整理，2 表示需注意、执行失败或通知未确认接受。
+
+需要发送本轮结果时使用 `--notify send`。可以先预览，再对**同一运行标识**改为 send：核对观察仍在 60 分钟内、报告与消息未变，然后仅发送，既不重读平台也不重新建任务。相同运行重复调用返回已有状态；已发送、拒绝、预留或结果未知都不会自动重发。新一天禁止复用旧日期的运行标识。拒绝或未知结果须核对实际回执，不得换名字绕过去重。
+
+入口只做读取、检查与通知，不创建副本、不排版、不调用公众号同步。`ready_to_format` 表示允许开始整理，消息明确为收齐但整理待完成。通知完成格式与转存仍用已验收检查点和 `notify_wecom.py --completion`，不能用收稿检查替代。
+
+## 两个单独入口
+
+```sh
+python3 scripts/wps_read.py --config local/daily-runner/config.json --run wps-YYYYMMDD-UNIQUE
+python3 scripts/xiumi_scan.py --config local/daily-runner/config.json \
+  --observation local/wps-reading/wps-YYYYMMDD-UNIQUE/observation.json \
+  --run xiumi-YYYYMMDD-UNIQUE
+```
+
+WPS 入口只定位「文档共享脚本」里的既有读取器，复制源码并与仓库 v1.1 比较，一致才运行。不会覆盖源码，不回退冻结个人版。等待本次新运行的开始、结束与执行完成标记，再直接保存页面渲染日志，验证分块、UTF-16 长度、校验码、日期和新鲜度。历史日期网页参数入口仍未配置，本入口只接受当天；历史测试不得改共享源码。
+
+秀米入口刷新只读稿件库、清空搜索、选「全部」，核对常用账号，再遍历所有分页。每页等待卡片稳定，检查页码、账号、筛选、总数及重复 ID，最后确认采集数等于页面总数；无法证明全库读完就报告失败。不会进入编辑器或触发恢复稿件。仅有恢复入口的旧稿记录为 unavailable，位置编号只代表本次列表槽位，不能作为可用稿件身份。
+
+全库中唯一、完整标题完全一致的可用稿件按确定规则匹配；重复同题稿保留歧义。相近标题仅生成候选，不因相似度高而确认。后续整理前仍须核对稿件正文及图片基线。
+
+## agent 接续语义核验
+
+标题不一致的候选由 agent 依据实际主题、部门、日期、正文、周次和版本核对。明确确认同稿可以继续，不要求人工批准；差异保留为提醒。错误周次、缺稿或未解决版本歧义仍停止。
+
+agent 将真实结论写到私有 decisions 文件，字段如下（虚构示例，不是验收记录）：
+
+```json
+{
+  "date": "YYYY-MM-DD",
+  "run_id": "check-YYYYMMDD-UNIQUE",
+  "matches": [{
+    "row": 6,
+    "id": "ACTUALLY_OBSERVED_DRAFT_ID",
+    "title": "页面实际完整标题",
+    "identity_reason": "依据实际正文、部门、周次与唯一版本的具体说明",
+    "evidence_paths": ["local/PRIVATE_CURRENT_PROOF.json"]
+  }]
+}
+```
+
+```sh
+python3 scripts/daily_run.py --config local/daily-runner/config.json \
+  --run check-YYYYMMDD-UNIQUE --decisions local/PRIVATE_DECISIONS.json --notify preview
+```
+
+仅允许接续该运行的 needs_attention 状态；日期、运行标识、候选 ID 和标题必须与实际观察一致，证据文件必须存在。过期观察重新读取，不能修改旧时间。文件存在和文字理由由程序检查，语义结论的真实性仍由 agent 的实际核验负责。此接口不能补造头条或替换预约规则。
+
+## 所有权、证据与恢复
+
+- 本机 `data/daily-runner.lock` 防止并行统一入口，SQLite 有效任务租约阻止其他业务执行者。任务按账号与日期复用；每次检查的运行标识单独记录。
+- 容器 `workflow-lease.json` 在整段浏览器操作中限制 browserctl 命令：仅当前持有者可操作；旧单条命令锁继续保留。它不能锁住用户手动操作 noVNC，也不协调另一台电脑，换机必须先停旧执行节点。
+- 正常结束释放租约，导出账本交接。硬中断可能留下锁；先核对进程、账本和页面，不自动抢锁或删锁。running 或未知结果不会自动重放，需要 agent 按实际检查点接续。
+- 原始日志、全库目录、页面证据、观察、报告、消息、通知回执和交接均保留在 Git 忽略目录。`local/daily-runner/runs/<运行标识>/state.json` 是定位入口；账本保存证据哈希。证据文件不可改写。
+- 换电脑需要代码、私有配置、账本、证据与回执；浏览器登录另行恢复或重新登录。三个入口在 Mac 验收，不等于本次更新已在 Windows 验收。
+
+## 验证记录
+
+Mac Docker 浏览器已实际完成共享源码核对、运行与日志直接落盘。早期实测当天一条预约；后续冷刷新读取到表格实时更新后的两条预约，证明输出来自本次运行。冷刷新已覆盖工具栏初载变化、实际英文菜单名以及共享列表延迟加载，不在列表加载时误折叠。秀米全标签 15 页遍历通过，包含只显示恢复入口的旧稿，采集总数与页面一致。统一入口已真实连通 WPS → 秀米 → 判断 → 通知预览 → 账本 → 释放 → 交接；该次头条未明确且候选版本尚未解决，准确报告 needs_attention，未据此整理或发送消息。
+
+92 项 Python 测试通过，包含共享源码变化阻止运行、旧/混合日志拒绝、展开列表加载保护、错误账号/分页保护、相似标题和恢复稿不自动确认、私有证据要求、同次运行不重放、跨日期运行标识拒绝、占用锁和通知未知不重发。实际证据定位为 `local/wps-reading/reader-cold-fifth-20261005/`、`local/xiumi-scan/scanner-seventh-20261005/`、`local/daily-runner/runs/integrated-20261005-preview/`；仅留在本机，不提交。
+
+源码变化、登录异常、账号不符、分页不可证明、旧运行日志、版本歧义、占用冲突和通知未知均按失败或待处理处理。Windows、跨账号共享脚本可见性、连续无人值守、长时登录保持及全流程自动排版/同步仍待验收。
+
+Windows 实机接续（2026-10-05）已核对原始 67 个源码文件哈希。Windows 发现并修复原生导入 `fcntl`、中文文件编码及 SQLite 连接关闭问题：纯函数可在 Windows 导入，原生容器命令明确拒绝，Linux 文件锁保持不变；中文文本显式 UTF-8 回读；业务租约检查及测试中的数据库连接显式关闭。修复后的 Mac 与 Windows 92 项测试均通过，补丁 before/after 哈希核对一致。私有结果包仍待返回核对。
+
+Windows Docker 标准构建受镜像仓库网络解析问题阻塞，已改为在私有临时构建文件中复用既有本地镜像、安装官方 Ubuntu xclip 并复制当前 browser.py，实际构建成功；重建容器后 xclip 与脚本哈希核对通过，原镜像和浏览器卷保留。Chromium 创建会话曾报 DevToolsActivePort 启动失败；实机诊断为指向旧容器的三个 Singleton 残留链接，清理已确认失效的链接后会话启动成功，保留登录数据。当天真实统一入口正在执行。标准网络下载部署和今天的 Windows 真实预约读取、收稿核验尚未通过，不能将单元测试通过记为业务跨系统验收完成。接续定位 `local/windows-check-20261005/state.json`。
+
+Windows 首轮真实统一入口返回 check_failed：匿名预览页面的英文登录弹窗延迟出现，遮挡 ToolsTab，但旧识别只在导航初次观察且限制登录控件标签，错误归为点击被遮挡。已补充英文可见控件识别、导航前登录检查及被遮挡后的重新观察，只有真实登录提示才归为 wps_login_required，不依据 shadow 类本身推断。Mac 新增两项回归用例，全套 94 项通过；补丁已传 Windows，实机复测及结果包核对待继续。原始失败报告保留不改写。
+
+Windows 后续补丁逐文件 before/after 哈希核对通过，94 项测试通过。使用者完成专用浏览器 WPS 登录后，新运行实际打开文档共享版、复制核对源码、执行并直接落盘日志；9/9 分块完整解码，读取当天 2 条预约。该轮秀米初次观察报告 xiumi_login_required，未遍历稿件库；稍后的 noVNC 画面显示空白稿件库外壳，当前尚待重新观察，不能仅凭页面标题判断已登录或将初载误判归为已修复。统一入口完整 Windows 验收及私有结果包回传仍未完成。通知仅预览，本机锁及任务租约据远端检查已释放，独立核对待回传证据。

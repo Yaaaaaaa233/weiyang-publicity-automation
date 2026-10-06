@@ -1,0 +1,26 @@
+{
+  "date": "2026-10-04",
+  "timezone": "Asia/Shanghai",
+  "observed_at": "2026-10-04T17:00:00+08:00",
+  "reservation": {
+    "status": "ok",
+    "complete": true,
+    "date": "2026-10-04",
+    "conflicts_resolved": true,
+    "evidence_paths": ["artifacts/fictional-sheet.png"],
+    "articles": [
+      {"row": 6, "title": "示例活动预告", "unit": "示例部门", "is_headline": false, "remarks": ""},
+      {"row": 7, "title": "示例头条稿件", "unit": "示例部门", "is_headline": true, "remarks": "头条"}
+    ]
+  },
+  "xiumi": {
+    "status": "ok",
+    "account_confirmed": true,
+    "search_complete": true,
+    "evidence_paths": ["artifacts/fictional-search.png"],
+    "matches": [
+      {"row": 6, "candidates": [{"id": "observed-draft-a", "title": "示例活动预告", "identity_confirmed": true}]},
+      {"row": 7, "candidates": [{"id": "observed-draft-b", "title": "示例头条稿件", "identity_confirmed": true}]}
+    ]
+  }
+}
