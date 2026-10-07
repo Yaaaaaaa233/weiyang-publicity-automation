@@ -143,7 +143,8 @@ class WrappersTests(unittest.TestCase):
         articles=[{'row':6,'title':'示例体育丨第二周活动'}]
         cards=[{'id':'1','title':'示例体育丨第三周活动','url':'observed'}]
         match=xiumi_scan.match_candidates(articles,cards)[0]
-        self.assertFalse(match['candidates'][0]['identity_confirmed'])
+        self.assertEqual(match['candidates'],[])
+        self.assertEqual(match['excluded_candidates'][0]['exclusion_reasons'],['different_week'])
         cards[0]['title']=articles[0]['title']
         self.assertTrue(xiumi_scan.match_candidates(articles,cards)[0]['candidates'][0]['identity_confirmed'])
         cards.append(dict(cards[0],id='2'))
@@ -171,6 +172,7 @@ class WrappersTests(unittest.TestCase):
                          'xiumi':{'evidence_paths':[],'matches':[{'row':6,'candidates':[{'id':'a','title':'正式标题','identity_confirmed':False}]}]}}
             decisions={'date':'2026-10-05','run_id':'run','matches':[{'row':6,'id':'a','title':'正式标题',
                        'identity_reason':'实际正文、部门和周次一致，唯一版本','evidence_paths':['local/proof.json']}]}
+            decisions['matches'][0]['body_checks']={k:{'result':'matched','reason':'Observed current body facts','evidence_paths':['local/proof.json']} for k in ('topic','department','date','week','unique_version')}
             result=daily_run.apply_decisions(copy.deepcopy(observation),decisions)
             self.assertTrue(result['xiumi']['matches'][0]['candidates'][0]['identity_confirmed'])
             for key,value in (('run_id','old'),('date','2026-09-21')):

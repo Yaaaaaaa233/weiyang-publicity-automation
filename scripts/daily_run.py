@@ -102,6 +102,10 @@ def apply_decisions(observation, decisions):
     """Agent may confirm semantic identity with fresh evidence, without human approval."""
     if decisions.get('run_id') != observation['run_id'] or decisions.get('date') != observation['date']:
         raise ValueError('Decisions belong to another run')
+    try:
+        from .draft_identity import validate_identity
+    except ImportError:
+        from draft_identity import validate_identity
     matches={m['row']:m for m in observation['xiumi']['matches']}
     seen=set()
     for item in decisions.get('matches',[]):
@@ -117,6 +121,7 @@ def apply_decisions(observation, decisions):
         candidate=[c for c in matches[row]['candidates'] if c['id']==item['id'] and c['title']==item['title']]
         if len(candidate)!=1 or candidate[0].get('available') is False:
             raise ValueError('Decision is not a currently observed candidate')
+        validate_identity(item,matches[row]['candidates'])
         matches[row]['candidates']=[dict(candidate[0],identity_confirmed=True,identity_reason=reason)]
         observation['xiumi']['evidence_paths'].extend(evidence)
     return observation
