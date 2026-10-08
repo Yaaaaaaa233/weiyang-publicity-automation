@@ -127,7 +127,7 @@ def apply_decisions(observation, decisions):
     return observation
 
 
-def execute(config, label, notification='preview', decisions_path=None):
+def _execute(config, label, notification='preview', decisions_path=None, run_log=None):
     if not label.replace('-','').replace('_','').isalnum():
         raise ValueError('Invalid run label')
     day=datetime.now(SHANGHAI).date().isoformat()
@@ -153,10 +153,10 @@ def execute(config, label, notification='preview', decisions_path=None):
                     if message!=notify_wecom.result_from_report(report,observation):
                         raise ValueError('Preview message was changed')
                     prior['notify_mode']='send'
-                    prior['notification']=notify_wecom.deliver(message,notify_wecom.configured_webhook(),execute=True)
+                    prior['notification']=notify_wecom.deliver_result(message,notify_wecom.configured_webhook(),execute=True)
                     evidence=[prior[k] for k in ('observation','report','message')]
                     receipt=prior['notification'].get('receipt')
-                    if receipt:
+                    for receipt in ([receipt] if receipt else prior['notification'].get('receipts', [])):
                         evidence.append(str(Path(receipt).relative_to(ROOT)))
                     status='ready_for_review' if report['ready_to_format'] else 'completed' if report['status']=='no_reservations' else 'needs_manual'
                     ledger.checkpoint(status,'notification_'+prior['notification']['status'],evidence,label)
@@ -175,6 +175,7 @@ def execute(config, label, notification='preview', decisions_path=None):
         state['notify_mode']=notification
         save_state(state_path,state)
         browser=Browser(folder/'browser',None,ledger.owner)
+        browser.log=run_log
         evidence=[]
         try:
             if decisions_path:
@@ -217,9 +218,9 @@ def execute(config, label, notification='preview', decisions_path=None):
             ledger_status='ready_for_review' if report['ready_to_format'] else 'completed' if report['status']=='no_reservations' else 'needs_manual'
             ledger.checkpoint(ledger_status,'checked',evidence,label)
             if notification=='send':
-                state['notification']=notify_wecom.deliver(message,notify_wecom.configured_webhook(),execute=True)
+                state['notification']=notify_wecom.deliver_result(message,notify_wecom.configured_webhook(),execute=True)
                 receipt=state['notification'].get('receipt')
-                if receipt:
+                for receipt in ([receipt] if receipt else state['notification'].get('receipts', [])):
                     evidence.append(str(Path(receipt).relative_to(ROOT)))
                 ledger.checkpoint(ledger_status,'notification_'+state['notification']['status'],evidence,label)
             else:
@@ -233,12 +234,34 @@ def execute(config, label, notification='preview', decisions_path=None):
             # Unexpected failures have unknown booking counts: report only the failed stage.
             if notification=='send':
                 message='未央宣传运营提醒｜'+day+'\n运行：'+label+'\n检查中断（'+state['error_code']+'），预约数量及整理结果尚未确认，请查看本机检查点。'
-                state['notification']=notify_wecom.deliver(message,notify_wecom.configured_webhook(),execute=True)
+                state['notification']=notify_wecom.deliver_result(message,notify_wecom.configured_webhook(),execute=True)
             raise
         finally:
             state['handoff']=ledger.finish()
             save_state(state_path,state)
     return state
+
+
+def execute(config, label, notification='preview', decisions_path=None, log=None):
+    try:
+        from .run_log import RunLog
+    except ImportError:
+        from run_log import RunLog
+    log = log or RunLog(label, datetime.now(SHANGHAI).date().isoformat(), root=ROOT)
+    try:
+        with log.stage('read_check_notify'):
+            state = _execute(config, label, notification, decisions_path, log)
+        observation = read(private_path(state['observation'])) if state.get('observation') else {}
+        count = len(observation.get('reservation',{}).get('articles',[])) if observation.get('reservation',{}).get('complete') else None
+        log.result(state['phase'], reservation_count=count,
+                   notification_status=state.get('notification',{}).get('status'),
+                   protected=state['phase'] not in ('no_reservations',))
+        for key in ('observation','report','message'):
+            if state.get(key): log.evidence(private_path(state[key]))
+        return state
+    except Exception:
+        log.result('failed', protected=True)
+        raise
 
 
 def main():

@@ -57,6 +57,10 @@ class Browser:
         self.evidence = []
 
     def command(self, *args):
+        started=time.monotonic()
+        log=getattr(self,'log',None)
+        if log and args[0] in ('inspect','screenshot','copy-editor') and log.capacity()['exceeded']:
+            raise Stop('log_capacity_exceeded','Private runtime storage limit reached; review retention before adding evidence')
         env = os.environ.copy()
         if self.token:
             env['WEIYANG_BROWSER_LEASE'] = self.token
@@ -71,6 +75,9 @@ class Browser:
         path = write(self.folder/('action-'+uuid.uuid4().hex+'.json'),
                      {'command':args[0],'stdout':proc.stdout,'stderr':proc.stderr,'exit_code':proc.returncode})
         self.evidence.append(str(path.relative_to(ROOT)))
+        if log:
+            log.event('browser_'+args[0], 'finished' if proc.returncode==0 else 'failed',time.monotonic()-started)
+            log.evidence(path)
         try:
             result = json.loads(proc.stdout)
         except ValueError as exc:
@@ -80,6 +87,10 @@ class Browser:
         value = result['result']
         if isinstance(value,dict) and value.get('local_artifact'):
             self.evidence.append(str(Path(value['local_artifact']).relative_to(ROOT)))
+            if log:log.evidence(Path(value['local_artifact']))
+        if isinstance(value,dict) and value.get('local_screenshot'):
+            self.evidence.append(str(Path(value['local_screenshot']).relative_to(ROOT)))
+            if log:log.evidence(Path(value['local_screenshot']))
         return value
 
     def snapshot(self, frame=None):
@@ -93,7 +104,7 @@ class Browser:
         return snapshot
 
     def click(self, node, frame=None):
-        args = ['click-element',node['selector'],'--expect-text',node.get('rendered_text',node['own_text'])]
+        args = ['click-element',node.get('stable_selector') or node['selector'],'--expect-text',node.get('rendered_text',node['own_text'])]
         if frame:
             args += ['--frame',frame]
         return self.command(*args)

@@ -66,8 +66,22 @@ const stablePath = e => {
     if (a.name.indexOf('data-') === 0 && !['data-testid', 'data-id'].includes(a.name))
       candidates.push(tag + '[' + a.name + '="' + escapeValue(a.value) + '"]');
   });
+  if (e.hasAttribute('ng-click')) candidates.push(tag + '[ng-click="' + escapeValue(e.getAttribute('ng-click')) + '"]');
+  const repeated = e.closest('[ng-repeat]');
+  if (repeated && repeated !== e) {
+    const classes = [...e.classList].filter(c => !c.startsWith('ng-'));
+    const suffix = tag + classes.map(c => '.' + CSS.escape(c)).join('');
+    candidates.push(repeated.tagName.toLowerCase() + '[ng-repeat="' +
+      escapeValue(repeated.getAttribute('ng-repeat')) + '"] ' + suffix);
+  }
   for (const candidate of candidates) {
-    try { if (document.querySelectorAll(candidate).length === 1) return candidate; } catch (error) {}
+    try {
+      const all = [...document.querySelectorAll(candidate)];
+      if (all.length === 1) return candidate;
+      // Exact rendered text and visibility must also be rechecked at action time.
+      const exact = all.filter(n => visible(n) && n.innerText === e.innerText);
+      if (e.innerText && exact.length === 1 && exact[0] === e) return candidate;
+    } catch (error) {}
   }
   return path(e);
 };
@@ -94,6 +108,8 @@ const nodes = elements.slice(0, 3000).map(e => ({
   selector:path(e),
   stable_selector:stablePath(e),
   inline_style:e.getAttribute('style') || '',
+  component_spacing:e.classList.contains('tn-comp-top-level') ?
+    {margin_top:getComputedStyle(e).marginTop, margin_bottom:getComputedStyle(e).marginBottom} : null,
   paragraph_text:e.tagName === 'P' ? (e.innerText || '').slice(0, 10000) : null,
   paragraph_text_truncated:e.tagName === 'P' && (e.innerText || '').length > 10000,
   href:e.tagName === 'A' ? e.href : null,
@@ -183,6 +199,43 @@ def find(sid, selector):
 
 def element_path(sid, selector, suffix):
     return session_path(sid, '/element/' + find(sid, selector) + suffix)
+
+
+def empty_component(sid, selector):
+    """Read every descendant, including hidden media, before an empty component deletion."""
+    result=call('POST', session_path(sid,'/execute/sync'), {'script': r"""
+const all=document.querySelectorAll(arguments[0]);
+if(all.length!==1) return {empty:false};
+const root=all[0];
+const nodes=[root,...root.querySelectorAll('*')];
+const empty=root.classList.contains('tn-comp-top-level') && !(root.textContent||'').trim() &&
+ !root.querySelector('img,picture,svg,video,audio,iframe,canvas,object,embed,a') &&
+ nodes.every(n=>getComputedStyle(n).backgroundImage==='none');
+return {empty:Boolean(empty)};
+""", 'args':[selector]})
+    if result.get('empty') is not True:
+        raise BrowserError('component not empty','Component contains text, decoration, links or media; do not delete.')
+    return result
+
+
+def click_element(sid, selector, expected_text):
+    """Resolve hidden duplicate cards only by visible exact text, never first match."""
+    matches = call('POST', session_path(sid, '/elements'),
+                   {'using': 'css selector', 'value': selector})
+    eligible = []
+    for element in matches:
+        target = session_path(sid, '/element/' + element[ELEMENT_KEY])
+        if call('GET', target + '/displayed') and call('GET', target + '/text').strip() == expected_text.strip():
+            eligible.append(target)
+    if len(eligible) != 1:
+        raise BrowserError('ambiguous click', 'Expected exactly one visible element with the complete expected text.')
+    target = eligible[0]
+    # Do not use enabled status to choose between two visually identical controls.
+    if not call('GET', target + '/enabled'):
+        raise BrowserError('unavailable element', 'Element must be enabled.')
+    if call('GET', target + '/text').strip() != expected_text.strip() or not call('GET', target + '/displayed'):
+        raise BrowserError('text mismatch', 'Element changed before dispatch.')
+    call('POST', target + '/click', {})
 
 
 def type_active(sid, text):
@@ -348,12 +401,14 @@ def main():
     sub = parser.add_subparsers(dest='command', required=True)
     for name in ('status', 'start', 'observe', 'reload', 'close', 'windows', 'lease-acquire', 'lease-release'):
         sub.add_parser(name)
+    p = sub.add_parser('close-window');p.add_argument('handle');p.add_argument('--expect-url',required=True);p.add_argument('--return-to',required=True)
     p = sub.add_parser('switch-window'); p.add_argument('handle')
     p = sub.add_parser('focus'); p.add_argument('selector')
     p.add_argument('--frame')
     p = sub.add_parser('click-element'); p.add_argument('selector')
     p.add_argument('--expect-text', required=True)
     p.add_argument('--frame')
+    p = sub.add_parser('check-empty'); p.add_argument('selector')
     p = sub.add_parser('copy-editor'); p.add_argument('selector'); p.add_argument('filename'); p.add_argument('--frame',required=True)
     p = sub.add_parser('new-window'); p.add_argument('url')
     p = sub.add_parser('open'); p.add_argument('url')
@@ -388,6 +443,8 @@ def main():
             return {'reused': reused, **observe(sid)}
         sid = existing()
         enter_frame(sid,None)
+        if args.command == 'check-empty':
+            return empty_component(sid,args.selector)
         if args.command == 'copy-editor':
             return copy_editor(sid,args.selector,args.filename,args.frame)
         if args.command in ('focus','click-element','key') and args.frame:
@@ -401,6 +458,13 @@ def main():
             call('POST', session_path(sid, '/window'), {'handle': created['handle']})
             navigate(sid, args.url)
             return {'previous_handle': previous, **observe(sid)}
+        if args.command == 'close-window':
+            handles=call('GET',session_path(sid,'/window/handles'))
+            if args.return_to not in handles or args.return_to==args.handle or call('GET',session_path(sid,'/window'))!=args.handle or call('GET',session_path(sid,'/url'))!=args.expect_url:
+                raise BrowserError('window identity changed','Do not close an unverified or last window.')
+            call('DELETE',session_path(sid,'/window'))
+            call('POST',session_path(sid,'/window'),{'handle':args.return_to})
+            return {'closed_handle':args.handle,**observe(sid)}
         if args.command == 'close':
             call('DELETE', session_path(sid)); STATE.unlink()
             return {'closed': True}
@@ -433,16 +497,7 @@ def main():
             enter_frame(sid,None)
             return {'focused': True, 'selector': args.selector, **observe(sid)}
         if args.command == 'click-element':
-            matches = call('POST', session_path(sid, '/elements'),
-                           {'using': 'css selector', 'value': args.selector})
-            if len(matches) != 1:
-                raise BrowserError('ambiguous click', 'Click selector must match exactly one element.')
-            target = session_path(sid, '/element/' + matches[0][ELEMENT_KEY])
-            if call('GET', target + '/text') != args.expect_text:
-                raise BrowserError('text mismatch', 'Element text changed; inspect again before clicking.')
-            if not call('GET', target + '/displayed') or not call('GET', target + '/enabled'):
-                raise BrowserError('unavailable element', 'Element must be displayed and enabled.')
-            call('POST', target + '/click', {})
+            click_element(sid, args.selector, args.expect_text)
             enter_frame(sid,None)
             return {'clicked': True, **observe(sid)}
         if args.command == 'open':

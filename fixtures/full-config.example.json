@@ -1,0 +1,10 @@
+{
+  "node_id": "win-primary",
+  "wps_url": "https://example.invalid/replace-with-observed-reservation-url",
+  "xiumi_library_url": "https://xiumi.us/#/user/papers",
+  "xiumi_account": "REPLACE_WITH_OBSERVED_ACCOUNT",
+  "reviewed_instructions_sha256": "REPLACE_WITH_REVIEWED_INSTRUCTIONS_FINGERPRINT",
+  "format_rules": "local/format-rules.json",
+  "composer_url": "https://xiumi.us/#/wxpack",
+  "target_account": "REPLACE_WITH_OBSERVED_AUTHORIZED_ACCOUNT"
+}

@@ -1,6 +1,6 @@
 """Workflow recovery and mutation guards using synthetic articles only."""
 import copy
-from contextlib import closing
+from contextlib import closing, nullcontext
 import json
 from pathlib import Path
 import tempfile
@@ -261,6 +261,7 @@ class WorkflowTests(unittest.TestCase):
                 def finish(self): events.append('release')
             class Browser:
                 def __init__(self, folder): self.evidence = []
+                def reserved(self): return nullcontext()
                 def command(self, *args): events.append(args[0]); return {}
                 def menu(self, plan):
                     snapshot = snapshot_with_count(3, plan)

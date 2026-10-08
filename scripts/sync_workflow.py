@@ -4,7 +4,7 @@ Plans, snapshots, action logs and durable handoffs stay in ignored local directo
 prepare never submits; submit requires --execute and records intent before clicking.
 """
 import argparse
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -20,9 +20,11 @@ import uuid
 try:
     from .check_sync_composition import check, has_class, inside
     from . import taskctl
+    from .check_runtime import Browser as RuntimeBrowser
 except ImportError:
     from check_sync_composition import check, has_class, inside
     import taskctl
+    from check_runtime import Browser as RuntimeBrowser
 
 ROOT = Path(__file__).resolve().parents[1]
 OWNER = 'sync-workflow'
@@ -175,18 +177,25 @@ def one(nodes, predicate, message):
     return values[0]
 
 
-class Browser:
+class Browser(RuntimeBrowser):
     def __init__(self, folder):
-        self.folder = folder
-        self.evidence = []
+        super().__init__(folder, task_owner=OWNER)
 
     def command(self, *args):
+        started=time.monotonic()
+        log=getattr(self,'log',None)
+        if log and args[0] in ('inspect','screenshot') and log.capacity()['exceeded']:
+            raise Stop('Private runtime evidence storage limit reached.')
         result = subprocess.run([sys.executable, str(ROOT / 'scripts/browserctl.py'), *args],
-                                cwd=ROOT, capture_output=True, text=True, encoding='utf-8', timeout=180)
+                                cwd=ROOT, env={**os.environ, **({'WEIYANG_BROWSER_LEASE':self.token} if self.token else {})},
+                                capture_output=True, text=True, encoding='utf-8', timeout=180)
         path = self.folder / ('action-' + uuid.uuid4().hex + '.json')
         write(path, {'command': args[0], 'args': list(args[1:]), 'exit_code': result.returncode,
                      'stdout': result.stdout, 'stderr': result.stderr})
         self.evidence.append(str(path.relative_to(ROOT)))
+        if log:
+            log.event('sync_'+args[0],'finished' if result.returncode==0 else 'failed',time.monotonic()-started)
+            log.evidence(path)
         try:
             payload = json.loads(result.stdout)
         except ValueError as exc:
@@ -201,6 +210,7 @@ class Browser:
         self.evidence.append(str(path.relative_to(ROOT)))
         snapshot = read(path)
         complete(snapshot)
+        if getattr(self,'log',None):self.log.evidence(path)
         return snapshot
 
     def wait(self, predicate, seconds=20):
@@ -431,69 +441,71 @@ def run(args):
             raise Stop('Submission needs the explicit --execute option; prepare does not submit.')
         ledger.claim()
         browser = Browser(folder)
+        browser.log=getattr(args,'run_log',None)
         try:
-            if args.command == 'confirm':
-                row, attempts = ledger.current()
-                if not row['workflow_submission_reserved'] or not attempts or ledger.state['phase'] not in ('submission_intent', 'awaiting_confirmation'):
-                    raise Stop('There is no pending submission to confirm.')
-                confirmation = folder / ('confirmation-' + uuid.uuid4().hex + '.json')
-                write(confirmation, {'source': 'operator_confirmation', 'result': args.result, 'note': args.note,
-                                     'at': datetime.now(timezone.utc).isoformat()})
-                ledger.checkpoint('completed' if args.result == 'ok' else 'needs_manual',
-                                  'confirmed' if args.result == 'ok' else 'problem_reported',
-                                  [str(confirmation.relative_to(ROOT))], user_confirmed=args.result == 'ok')
-            elif args.command == 'attach':
-                browser.command('start')
-                snapshot = browser.menu(plan)
-                count = prefix_length(snapshot, plan)
-                ledger.state['handle'] = browser.command('observe')['handle']
-                ledger.save()
-                row, _ = ledger.current()
-                keep_phase = row['workflow_submission_reserved'] or row['status'] == 'completed'
-                ledger.checkpoint(row['status'] if keep_phase else 'checking',
-                                  ledger.state['phase'] if keep_phase else 'attached', list(browser.evidence),
-                                  attached_prefix_count=count)
-            else:
-                browser.command('start')
-                if args.command == 'prepare' and not args.resume:
-                    opened = browser.command('new-window', plan['composer_url'])
-                    ledger.state['handle'] = opened['handle']
-                    ledger.save()
-                    browser.wait(lambda s: any(n.get('own_text') == '同步到公众号' for n in s['nodes']))
-                else:
-                    if not ledger.state.get('handle'):
-                        raise Stop('Window identity is missing. Observe and recover it manually.')
-                    browser.command('switch-window', ledger.state['handle'])
-                if args.command == 'prepare':
-                    row, _ = ledger.current()
-                    if row['workflow_submission_reserved'] or ledger.state['phase'] in ('confirmed', 'problem_reported'):
-                        raise Stop('This run has reached submission; inspect its result instead of recomposing.')
-                    snapshot = assemble(browser, plan, lambda phase, index: ledger.checkpoint(
-                        'checking', phase, list(browser.evidence), article_index=index))
-                else:
+            with (browser.reserved() if args.command != 'confirm' else nullcontext()):
+                if args.command == 'confirm':
+                    row, attempts = ledger.current()
+                    if not row['workflow_submission_reserved'] or not attempts or ledger.state['phase'] not in ('submission_intent', 'awaiting_confirmation'):
+                        raise Stop('There is no pending submission to confirm.')
+                    confirmation = folder / ('confirmation-' + uuid.uuid4().hex + '.json')
+                    write(confirmation, {'source': 'operator_confirmation', 'result': args.result, 'note': args.note,
+                                         'at': datetime.now(timezone.utc).isoformat()})
+                    ledger.checkpoint('completed' if args.result == 'ok' else 'needs_manual',
+                                      'confirmed' if args.result == 'ok' else 'problem_reported',
+                                      [str(confirmation.relative_to(ROOT))], user_confirmed=args.result == 'ok')
+                elif args.command == 'attach':
+                    browser.command('start')
                     snapshot = browser.menu(plan)
-                _, attempts = ledger.current()
-                actual_plan = {**plan, 'prior_sync_attempts': attempts}
-                result = check(snapshot, actual_plan)
-                report = ROOT / 'artifacts' / ('sync-preflight-' + uuid.uuid4().hex + '.json')
-                write(report, result)
-                browser.evidence.append(str(report.relative_to(ROOT)))
-                if not result['composition_checks_passed']:
-                    raise Stop('Composition preflight failed. Resolve the private report before continuing.')
-                if args.command == 'prepare':
-                    ledger.checkpoint('ready_for_review', 'prepared', list(browser.evidence),
-                                      composition_checks_passed=True, submission_review_allowed=attempts == 0)
-                elif args.command == 'submit':
-                    button = one(snapshot['nodes'], lambda n: has_class(n, 'ok-btn') and
-                                 n.get('own_text') == '开始同步', 'Start-sync button is ambiguous.')
-                    reserve_submission(ledger, list(browser.evidence))
-                    browser.click_text(button, '开始同步')
-                    # Capture the immediate result once, but do not infer success from it.
-                    browser.snapshot()
-                    ledger.checkpoint('verification_pending', 'awaiting_confirmation', list(browser.evidence),
-                                      sync_attempt_count=1, final_platform_result='unconfirmed', click_command_returned=True)
-            return {'ok': True, 'phase': ledger.state['phase'], 'task_id': ledger.task_id,
-                    'sync_attempt_count': ledger.current()[1], 'run': args.run}
+                    count = prefix_length(snapshot, plan)
+                    ledger.state['handle'] = browser.command('observe')['handle']
+                    ledger.save()
+                    row, _ = ledger.current()
+                    keep_phase = row['workflow_submission_reserved'] or row['status'] == 'completed'
+                    ledger.checkpoint(row['status'] if keep_phase else 'checking',
+                                      ledger.state['phase'] if keep_phase else 'attached', list(browser.evidence),
+                                      attached_prefix_count=count)
+                else:
+                    browser.command('start')
+                    if args.command == 'prepare' and not args.resume:
+                        opened = browser.command('new-window', plan['composer_url'])
+                        ledger.state['handle'] = opened['handle']
+                        ledger.save()
+                        browser.wait(lambda s: any(n.get('own_text') == '同步到公众号' for n in s['nodes']))
+                    else:
+                        if not ledger.state.get('handle'):
+                            raise Stop('Window identity is missing. Observe and recover it manually.')
+                        browser.command('switch-window', ledger.state['handle'])
+                    if args.command == 'prepare':
+                        row, _ = ledger.current()
+                        if row['workflow_submission_reserved'] or ledger.state['phase'] in ('confirmed', 'problem_reported'):
+                            raise Stop('This run has reached submission; inspect its result instead of recomposing.')
+                        snapshot = assemble(browser, plan, lambda phase, index: ledger.checkpoint(
+                            'checking', phase, list(browser.evidence), article_index=index))
+                    else:
+                        snapshot = browser.menu(plan)
+                    _, attempts = ledger.current()
+                    actual_plan = {**plan, 'prior_sync_attempts': attempts}
+                    result = check(snapshot, actual_plan)
+                    report = ROOT / 'artifacts' / ('sync-preflight-' + uuid.uuid4().hex + '.json')
+                    write(report, result)
+                    browser.evidence.append(str(report.relative_to(ROOT)))
+                    if not result['composition_checks_passed']:
+                        raise Stop('Composition preflight failed. Resolve the private report before continuing.')
+                    if args.command == 'prepare':
+                        ledger.checkpoint('ready_for_review', 'prepared', list(browser.evidence),
+                                          composition_checks_passed=True, submission_review_allowed=attempts == 0)
+                    elif args.command == 'submit':
+                        button = one(snapshot['nodes'], lambda n: has_class(n, 'ok-btn') and
+                                     n.get('own_text') == '开始同步', 'Start-sync button is ambiguous.')
+                        reserve_submission(ledger, list(browser.evidence))
+                        browser.click_text(button, '开始同步')
+                        # Capture the immediate result once, but do not infer success from it.
+                        browser.snapshot()
+                        ledger.checkpoint('verification_pending', 'awaiting_confirmation', list(browser.evidence),
+                                          sync_attempt_count=1, final_platform_result='unconfirmed', click_command_returned=True)
+                return {'ok': True, 'phase': ledger.state['phase'], 'task_id': ledger.task_id,
+                        'sync_attempt_count': ledger.current()[1], 'run': args.run}
         except (Stop, OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired):
             row, _ = ledger.current()
             if ledger.state['phase'] not in ('confirmed', 'problem_reported'):

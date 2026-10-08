@@ -1,0 +1,5 @@
+{
+  "head_sources": ["https://example.invalid/observed-head.gif"],
+  "tail_sources": ["https://example.invalid/observed-tail.gif"],
+  "evidence_paths": ["local/actual-head-tail-review.json"]
+}

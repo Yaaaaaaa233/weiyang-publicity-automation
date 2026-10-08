@@ -95,6 +95,52 @@ def deliver(message, webhook, execute=False, sender=post_once):
             'execute_requested': True}
 
 
+def split_message(message, limit=1800):
+    """Deterministic lossless UTF-8 splitting, with context on every part."""
+    if not isinstance(message, str) or not message.strip():
+        raise ValueError('Empty message')
+    if len(message.encode('utf-8')) <= limit:
+        return [message]
+    heading = message.split('\n', 1)[0]
+    # Keep date and execution identity visible when a part is viewed separately.
+    lines = message.splitlines(keepends=True)
+    if len(lines) > 1 and lines[1].startswith('运行：'):
+        heading += '\n' + lines[1].rstrip('\n')
+    budget = limit - len((heading + '\n分段 9999/9999\n').encode('utf-8'))
+    if budget < 16:
+        raise ValueError('Notification heading too large')
+    chunks, current, size = [], [], 0
+    for char in message:
+        n = len(char.encode('utf-8'))
+        if size + n > budget:
+            chunks.append(''.join(current)); current, size = [], 0
+        current.append(char); size += n
+    if current:
+        chunks.append(''.join(current))
+    if len(chunks) > 9999:
+        raise ValueError('Too many notification parts')
+    return [heading + '\n分段 ' + str(i) + '/' + str(len(chunks)) + '\n' + chunk
+            for i, chunk in enumerate(chunks, 1)]
+
+
+def deliver_result(message, webhook, execute=False, sender=post_once):
+    """Send all parts in order. Unknown/rejected part blocks the remaining batch."""
+    parts = split_message(message)
+    if len(parts) == 1:
+        return deliver(parts[0], webhook, execute, sender)
+    results = []
+    for part in parts:
+        result = deliver(part, webhook, execute, sender)
+        results.append(result)
+        if result['status'] not in ('accepted', 'dry_run'):
+            break
+    status = results[-1]['status']
+    return {'status': status, 'duplicate': all(r['duplicate'] for r in results),
+            'execute_requested': execute, 'parts_total': len(parts),
+            'parts_processed': len(results), 'parts': results,
+            'receipts': [r['receipt'] for r in results if r.get('receipt')]}
+
+
 def private_file(path):
     path = path.resolve()
     if not any(path.is_relative_to((ROOT / folder).resolve()) for folder in ('local', 'artifacts', 'data')):
@@ -253,6 +299,8 @@ def completion_from_report(report, observation, completion):
         if sync.get('confirmed_by') not in ('user', 'platform'):
             raise ValueError('Synchronization requires an explicit confirmation source')
         outcome = '已校验基础格式并转存到微信公众号草稿箱。'
+    elif sync.get('dispatch_result') == 'unknown':
+        outcome = '已校验基础格式；转存尝试的结果未知，尚不能报告转存完成。'
     else:
         outcome = '已校验基础格式并发起转存；转存结果待确认，尚不能报告转存完成。'
     lines = [notification_heading(report), '今日预约 ' + str(len(order)) + ' 篇：']
@@ -292,7 +340,7 @@ def main():
             message = completion_from_report(report, observation, completion)
         else:
             message = result_from_report(report, observation)
-    result = deliver(message, configured_webhook(), execute=args.execute)
+    result = deliver_result(message, configured_webhook(), execute=args.execute)
     print(json.dumps(result, ensure_ascii=False))
     return 0 if result['status'] in ('accepted', 'dry_run') else 2
 

@@ -167,7 +167,7 @@ def match_candidates(articles, cards):
             # Similarity only locates review candidates; never confirms identity.
             target=normalize(article['title'])
             candidates=[dict(c,identity_confirmed=False) for c in eligible
-                        if not c['title'].startswith(('【定时验证','【同步验证','【排版验证'))
+                        if not c['title'].startswith(('【定时验证','【同步验证','【排版验证','【全流程验证','【自动整理'))
                         and target and normalize(c['title']) and (target in normalize(c['title']) or normalize(c['title']) in target
                         or SequenceMatcher(None,target,normalize(c['title'])).ratio()>=.45)]
         matches.append({'row':article['row'],'candidates':candidates,'excluded_candidates':excluded})
