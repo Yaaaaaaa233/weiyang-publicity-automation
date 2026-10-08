@@ -82,7 +82,7 @@ class RunLogTests(unittest.TestCase):
         log=r.RunLog('fixture','2026-01-01')
         with self.assertRaises(RuntimeError):
             with log.stage('fixture'):raise RuntimeError('secret webhook and manuscript')
-        content=(log.folder/'events.jsonl').read_text()
+        content=(log.folder/'events.jsonl').read_text(encoding='utf-8')
         self.assertNotIn('secret',content);self.assertIn('RuntimeError',content)
         self.assertFalse(log.value['active'])
     def test_retention_dry_run_and_protected_ledger_survival(self):
@@ -96,7 +96,7 @@ class RunLogTests(unittest.TestCase):
         self.assertTrue((log.folder/'events.jsonl').exists())
         r.cleanup(True)
         self.assertFalse((log.folder/'events.jsonl').exists());self.assertTrue(log.path.exists())
-        self.assertTrue((protected.folder/'events.jsonl').exists());self.assertEqual(ledger.read_text(),'keep')
+        self.assertTrue((protected.folder/'events.jsonl').exists());self.assertEqual(ledger.read_text(encoding='utf-8'),'keep')
     def test_compression_preserves_detail_and_capacity_only_warns(self):
         log=r.RunLog('fixture','2026-01-01');log.event('check','finished')
         log.value.update(updated_at=(datetime.now(r.SHANGHAI)-timedelta(days=10)).isoformat(),protected=False)
@@ -299,7 +299,7 @@ class CopyLifecycleTests(unittest.TestCase):
         for _ in range(2):
             with self.assertRaises(Stop):drafts.prepare(article,candidate)
         self.assertEqual(events.count('click_saveas'),1)
-        self.assertTrue(json.loads(drafts.index_path.read_text())['copies']['1']['copy_reserved'])
+        self.assertTrue(json.loads(drafts.index_path.read_text(encoding='utf-8'))['copies']['1']['copy_reserved'])
     def test_body_corruption_stops_before_title_or_save(self):
         drafts,events=self.fixture(corrupt=True)
         with self.assertRaises(Stop):drafts.prepare({'row':1,'is_headline':True},{'id':'1','title':sample()['title']})
@@ -318,7 +318,7 @@ class NotificationIntentTests(unittest.TestCase):
             with patch.object(n,'configured_webhook',return_value='fixture'), \
                  patch.object(n,'deliver_result',side_effect=OSError('disk full')) as sender:
                 with self.assertRaises(OSError):full_run.send_notification(folder,state,'original result')
-                self.assertIn('notification_intent',json.loads((folder/'state.json').read_text()))
+                self.assertIn('notification_intent',json.loads((folder/'state.json').read_text(encoding='utf-8')))
                 with self.assertRaises(Stop):full_run.send_notification(folder,state,'alternate failure text')
                 self.assertEqual(sender.call_count,1)
     def test_success_clears_intent_and_stores_actual_receipt(self):

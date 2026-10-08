@@ -118,7 +118,7 @@ class RunLog:
             if record[k] is not None and (type(record[k]) is not int or record[k] < 0):
                 raise ValueError('Tokens must be nonnegative integers or unknown')
         path = self.folder/'usage.jsonl'
-        existing = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+        existing = [json.loads(line) for line in path.read_text(encoding='utf-8').splitlines()] if path.exists() else []
         same = [r for r in existing if r['request_id'] == record['request_id']]
         if same:
             if same[0] != record:

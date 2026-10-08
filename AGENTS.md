@@ -22,6 +22,7 @@
 - 秀米同步 App/API 路线已暂停；不得为本项目继续提交身份材料或申请公开回调接口。
 
 ## 接续工作
+- 2026-10-08 第二阶段 Windows 更新与只读预检完成：Mac/Windows 136 项 Python 测试通过，Windows 默认 cp936 无 UTF-8 环境覆盖亦通过。源码 83 文件及返回材料 75 文件哈希独立核对一致；共享 WPS v1.2、Docker、常用秀米登录及私有通知配置已核对。当天预览 4 条预约、2 条无候选，needs_attention，未建稿/转存/通知；没有启用 Windows 调度。DSH v4 单轮用量导出真实 61 次调用验证通过，压缩归属不明为 partial，部署轮次不得当业务成本。合盖动作未确认，临时无人值守触发、agent 测量窗口初始化及前次同步用户确认仍待完成。先读 docs/windows-deployment-preparation.md 和本机 local/windows-deploy-20261008/state.json；历史同步禁止重放。
 - 2026-10-08 第一阶段封装：新增 full_run、draft_workflow、run_log、run_report；130 项 Python 测试通过。正文候选观察与语义判断用固定私有接口，合规副本自动保存冷重开，修复按新观察逐步执行；同步可见全文唯一消歧并持有浏览器租约，未知提交恢复禁止重发；长通知分段去重。先读 docs/full-runner.md 和 docs/run-logging.md。尚未在 Windows 验收新版、未启动三天运行、未改调度。DSH 真实单轮用量导出适配仍待第二阶段，不能以会话累计数代替。日志明细可压缩清理，原始任务证据不自动删除；5 GiB 采集上限保护。
 - 2026-10-07 Windows 完整监督验证：25e67e2 已更新，104 项测试通过；WPS 共享 v1.2 已部署并冷重开实读当天。两篇独立副本正文图片保存重开核对通过，企业微信真实回执 accepted；公众号同步仅提交一次，最终结果待使用者核对，禁止重放。返回证据已独立校验。不是无人值守通过，DSH 全会话用量不能算本轮成本。详见 docs/windows-full-validation.md，本机 local/windows-full-20261007/state.json。此条覆盖上方线上仍 v1.1/Windows 未部署的旧状态；不调整定时任务或启动三天试运行。
 - 2026-10-07 新增 draft_identity 规则：候选明确部门/周次/预告回顾冲突排除；daily_run语义决策必须提供逐项正文事实与引用、多候选逐份复核和真正同稿多版的选择依据。首次发现账号库存已接入。104项测试通过，正文观察仍由agent完成、未实现无人值守正文采集；Windows未部署。见docs/draft-matching-validation.md新增格式，不能仅给一句identity_reason接续。
