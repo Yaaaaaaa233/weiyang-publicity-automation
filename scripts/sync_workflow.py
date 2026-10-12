@@ -57,8 +57,11 @@ def validate_plan(plan):
     url = urlsplit(plan.get('composer_url', ''))
     if url.scheme != 'https' or url.hostname != 'xiumi.us' or url.username or url.password:
         raise Stop('Use the composition URL actually observed on the official Xiumi page.')
-    if len([a for a in plan['articles'] if a['is_headline']]) != 1:
-        raise Stop('Exactly one confirmed headline is required.')
+    # Zero marked headlines is a legal unmarked day (operator decision 2026-10-12):
+    # ordered() then degenerates to plain sheet order.  Two or more stay refused --
+    # that ordering is genuinely ambiguous and the plan must not invent a lead.
+    if len([a for a in plan['articles'] if a['is_headline']]) > 1:
+        raise Stop('At most one confirmed headline is allowed; multiple headlines leave the order ambiguous.')
     for article in plan['articles']:
         if not isinstance(article.get('source_title'), str) or not article['source_title'].strip():
             raise Stop('Each article needs its confirmed complete library title.')
@@ -415,6 +418,37 @@ def reserve_submission(ledger, evidence):
     return ledger.state
 
 
+def platform_success(snapshot):
+    """Only an explicit visible result dialog; body/article text is not a receipt."""
+    nodes=snapshot['nodes']
+    for n in nodes:
+        rect=n.get('rect',{})
+        if n.get('own_text') not in ('同步成功','同步到公众号成功') or not rect.get('width',0) or not rect.get('height',0):continue
+        if any(inside(n,p) and (p.get('role') in ('dialog','alert') or
+               any(has_class(p,k) for k in ('modal','dialog','sync-result','alert-success')))
+               for p in nodes):return True
+    return False
+
+
+def observe_submission(browser, ledger):
+    if ledger.state['phase']=='confirmed':return
+    if not ledger.state.get('submission_reserved') or not ledger.state.get('click_command_returned'):
+        return  # A reserved click with an unknown result is never inferred successful.
+    browser.command('switch-window',ledger.state['handle'])
+    try:
+        snapshot=browser.wait(platform_success,seconds=30)
+    except Stop:
+        return  # No explicit result: pending, not failed and not resubmitted.
+    if not check(snapshot,{**ledger.plan,'prior_sync_attempts':1})['composition_checks_passed']:
+        return  # Success dialog must accompany this exact target/order/cover composition.
+    proof=ledger.folder/('platform-success-'+uuid.uuid4().hex+'.json')
+    write(proof,{'source':'platform_result_dialog','result':'ok','handle':ledger.state['handle'],
+                 'at':datetime.now(timezone.utc).isoformat(),'evidence_paths':list(browser.evidence)})
+    ledger.checkpoint('completed','confirmed',list(browser.evidence)+[str(proof.relative_to(ROOT))],
+                      confirmed_by='platform',platform_success_evidence=str(proof.relative_to(ROOT)),
+                      final_platform_result='confirmed')
+
+
 def run(args):
     if not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}', args.run):
         raise Stop('Use a short run name containing letters, digits, underscores or hyphens.')
@@ -454,6 +488,9 @@ def run(args):
                     ledger.checkpoint('completed' if args.result == 'ok' else 'needs_manual',
                                       'confirmed' if args.result == 'ok' else 'problem_reported',
                                       [str(confirmation.relative_to(ROOT))], user_confirmed=args.result == 'ok')
+                elif args.command == 'observe-result':
+                    browser.command('start')
+                    observe_submission(browser,ledger)
                 elif args.command == 'attach':
                     browser.command('start')
                     snapshot = browser.menu(plan)
@@ -498,12 +535,14 @@ def run(args):
                     elif args.command == 'submit':
                         button = one(snapshot['nodes'], lambda n: has_class(n, 'ok-btn') and
                                      n.get('own_text') == '开始同步', 'Start-sync button is ambiguous.')
+                        if platform_success(snapshot):raise Stop('Stale success dialog exists before submission')
                         reserve_submission(ledger, list(browser.evidence))
                         browser.click_text(button, '开始同步')
                         # Capture the immediate result once, but do not infer success from it.
                         browser.snapshot()
                         ledger.checkpoint('verification_pending', 'awaiting_confirmation', list(browser.evidence),
                                           sync_attempt_count=1, final_platform_result='unconfirmed', click_command_returned=True)
+                        observe_submission(browser,ledger)
                 return {'ok': True, 'phase': ledger.state['phase'], 'task_id': ledger.task_id,
                         'sync_attempt_count': ledger.current()[1], 'run': args.run}
         except (Stop, OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired):
@@ -524,6 +563,7 @@ def main():
     p = sub.add_parser('prepare'); p.add_argument('plan', type=Path); p.add_argument('--run', required=True)
     p.add_argument('--resume', action='store_true')
     p = sub.add_parser('submit'); p.add_argument('--run', required=True); p.add_argument('--execute', action='store_true')
+    p = sub.add_parser('observe-result'); p.add_argument('--run', required=True)
     p = sub.add_parser('inspect'); p.add_argument('--run', required=True)
     p = sub.add_parser('attach'); p.add_argument('--run', required=True)
     p.add_argument('--current-window', action='store_true', required=True)

@@ -7,18 +7,19 @@ import argparse
 from datetime import datetime
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 from types import SimpleNamespace
 import uuid
 
 try:
-    from . import daily_run, daily_check, notify_wecom, sync_workflow, draft_workflow
+    from . import daily_run, daily_check, notify_wecom, sync_workflow, draft_workflow, transfer_registry, transfer_tags
     from .check_runtime import Browser, ROOT, read, write, private_path, Stop
     from .read_wps_reservation import SHANGHAI
     from .run_log import RunLog
 except ImportError:
-    import daily_run, daily_check, notify_wecom, sync_workflow, draft_workflow
+    import daily_run, daily_check, notify_wecom, sync_workflow, draft_workflow, transfer_registry, transfer_tags
     from check_runtime import Browser, ROOT, read, write, private_path, Stop
     from read_wps_reservation import SHANGHAI
     from run_log import RunLog
@@ -26,6 +27,27 @@ except ImportError:
 
 def sync_call(command, run, **kwargs):
     return sync_workflow.run(SimpleNamespace(command=command,run=run,**kwargs))
+
+def config_signature(config):
+    return draft_workflow.fingerprint({k:v for k,v in config.items() if k!='transfer_tag_ui'})
+
+# Report issues that an agent may settle by reading the observed bodies.  Anything
+# outside this set is a final check outcome, not a request for semantic judgment.
+# Named here rather than inline so the decision of what the body path may handle is
+# stated once and can be asserted directly by tests and by the acceptance report.
+SEMANTIC_IDENTITY_ISSUES = ('identity_or_week_unresolved', 'candidate_identity_unresolved',
+                            'identity_match_reason_missing')
+
+def transfer_tags_enabled():
+    """Platform-side tagging is paused by default (operator decision, 2026-10-10).
+
+    The 「转存好」 label only served this automation, and the private transfer registry
+    already excludes already-transferred manuscripts by id, so the label was redundant
+    bookkeeping written onto received manuscripts that are not ours. Recording the state
+    privately is the point; a production run should leave no artificial mark on the
+    platform. Set WEIYANG_TRANSFER_TAGS=1 to run a deliberate tag round.
+    """
+    return os.environ.get('WEIYANG_TRANSFER_TAGS','0')=='1'
 
 def save(path,value):
     path.parent.mkdir(parents=True,exist_ok=True);daily_run.save_state(path,value)
@@ -74,6 +96,9 @@ def finish_submission(folder, state, log, execute=True):
     daily_check.check_evidence(observation)
     sync_path=ROOT/'local/sync-workflow'/state['sync_run']/'state.json'
     actual=read(sync_path)
+    if execute and actual['phase']=='awaiting_confirmation' and state.get('config'):
+        sync_call('observe-result',state['sync_run'],run_log=log)
+        actual=read(sync_path)
     if not actual.get('submission_reserved'):raise Stop('submission_not_reserved','No pending submission')
     formats=state['formatted_articles']
     completion={'date':state['date'],'run_id':state['run_id'],'formatted_articles':formats,
@@ -81,12 +106,16 @@ def finish_submission(folder, state, log, execute=True):
                         'ordered_draft_ids':[a['draft_id'] for a in formats],
                         'dispatch_result':'returned' if actual.get('click_command_returned') else 'unknown',
                         'evidence_paths':[str(sync_path.relative_to(ROOT)),actual['handoff_path']]}}
-    if completion['sync']['status']=='confirmed':completion['sync']['confirmed_by']='user'
-    completion_path=folder/'completion.json'
-    if completion_path.exists() and read(completion_path)!=completion:raise Stop('completion_changed','Existing result differs; use explicit confirmation')
+    if completion['sync']['status']=='confirmed':completion['sync']['confirmed_by']=actual.get('confirmed_by','user')
+    completion_path=folder/('platform-completion.json' if actual.get('confirmed_by')=='platform' else 'completion.json')
+    if completion_path.exists():
+        previous=read(completion_path)
+        comparable={**previous,'sync':{**previous['sync'],'evidence_paths':completion['sync']['evidence_paths']}}
+        if comparable!=completion:raise Stop('completion_changed','Existing result differs; inspect original completion')
+        completion=previous  # Preserve the exact notification evidence/text during read-only recovery.
     if not completion_path.exists():write(completion_path,completion)
     message=notify_wecom.completion_from_report(report,observation,completion)
-    message_path=folder/'completion-message.txt'
+    message_path=folder/('platform-completion-message.txt' if actual.get('confirmed_by')=='platform' else 'completion-message.txt')
     if message_path.exists() and message_path.read_text(encoding='utf-8')!=message:raise Stop('completion_message_changed','Pending notification text changed')
     if not message_path.exists():message_path.write_text(message,encoding='utf-8')
     state.update(completion=str(completion_path.relative_to(ROOT)),message=str(message_path.relative_to(ROOT)))
@@ -94,7 +123,39 @@ def finish_submission(folder, state, log, execute=True):
     if execute:
         with log.stage('completion_notification'):
             state['notification']=send_notification(folder,state,message)
-    state['phase']='completed' if actual['phase']=='confirmed' else 'awaiting_confirmation'
+    state['phase']=('completed' if execute else 'ready_to_finalize') if actual['phase']=='confirmed' else 'awaiting_confirmation'
+    if state.get('config') and execute:
+        account=state['config']['xiumi_account']
+        transfer_registry.reserve(account,state['run_id'],formats)
+        transfer_registry.update(account,state['run_id'],status='confirmed' if actual['phase']=='confirmed' else 'submitted',
+                                 notification_status=state.get('notification',{}).get('status'))
+        if actual['phase']=='confirmed':
+            if state.get('notification',{}).get('status')!='accepted':
+                state['phase']='notification_pending'
+            elif not transfer_tags_enabled():
+                # Paused: no label is written onto the source manuscript or the copy. The run is
+                # complete on the private record, and the status is recorded as paused rather
+                # than as a verified tag, so nothing claims a platform mark that was not made.
+                state['phase']='completed'
+                transfer_registry.update(account,state['run_id'],tag_status='paused_by_operator')
+            else:
+                state['phase']='tagging_required';save(folder/'state.json',state)
+                tagged_ids=state.setdefault('tagged_ids',[])
+                def checkpoint(identifier,evidence):
+                    if identifier not in tagged_ids:tagged_ids.append(identifier)
+                    state['tag_evidence']=list(dict.fromkeys(state.get('tag_evidence',[])+evidence))
+                    save(folder/'state.json',state)
+                browser=Browser(folder/'tag-evidence');browser.log=log
+                try:
+                    with browser.reserved(),log.stage('transfer_tags'):
+                        browser.command('start')
+                        transfer_tags.apply(browser,state['config'],formats,checkpoint)
+                    state['phase']='completed'
+                    transfer_registry.update(account,state['run_id'],status='tagged',tag_status='verified',
+                                             evidence_paths=state.get('tag_evidence',[]))
+                except (Stop,KeyError) as exc:
+                    state['tag_error']=getattr(exc,'code','tag_adapter_required')
+                    state['tag_request']={'label':'转存好','articles':formats,'next_step':'Observe label UI, apply/verify each source and copy label; resume only tags, never sync.'}
     log.result(state['phase'],reservation_count=len(report['ordered_rows']),formatted_count=len(formats),
                sync_status=completion['sync']['status'],notification_status=state.get('notification',{}).get('status'),protected=state['phase']!='completed')
     log.evidence(completion_path);save(folder/'state.json',state);return state
@@ -102,15 +163,16 @@ def finish_submission(folder, state, log, execute=True):
 
 def execute(config, run_id, execute=False, decisions=None, action=None, recovery=None):
     day=datetime.now(SHANGHAI).date().isoformat()
-    log=RunLog(run_id,day,config.get('node_id'),root=ROOT)
     folder=private_path('local/full-run/'+run_id);folder.mkdir(parents=True,exist_ok=True)
     path=folder/'state.json'
     state=read(path) if path.exists() else {'date':day,'run_id':run_id,'phase':'created',
-                                         'config_sha256':draft_workflow.fingerprint(config)}
-    if state['date']!=day or state['config_sha256']!=draft_workflow.fingerprint(config):
+                                         'config_sha256':config_signature(config)}
+    log=RunLog(run_id,state['date'],config.get('node_id'),root=ROOT)
+    if (state['date']!=day and not state.get('sync_run')) or state['config_sha256']!=config_signature(config):
         raise Stop('run_changed','Run date/config changed; resume the original identity and configuration')
-    if state['phase'] in ('completed','awaiting_confirmation','no_reservations'):
+    if state['phase'] in ('completed','no_reservations'):
         return state  # No business operation is replayed at a terminal checkpoint.
+    state['config']=config;save(path,state)
     with sync_workflow.runner_lock(ROOT/'data/full-run.lock'):
         try:
             if state.get('sync_run'):
@@ -121,8 +183,10 @@ def execute(config, run_id, execute=False, decisions=None, action=None, recovery
                 if not state.get('identity_request'):raise Stop('body_collection_missing','Collect actual candidate bodies before supplying identity decisions')
                 validate_body_decisions(read(private_path(decisions)),read(private_path(state['identity_request'])))
             with log.stage('reservation_matching'):
-                checked=daily_run.execute(config,run_id,'preview',decisions,log=log)
+                checked=daily_run.execute(config,run_id,'preview',decisions,log=log,notify_on_fatal=False)
             state.update(check_state=checked,phase=checked['phase']);save(path,state)
+            if not checked.get('observation'):
+                raise Stop('check_state_incomplete','Checked state carries no observation; run the check again with a fresh identity')
             observation=read(private_path(checked['observation']))
             report=read(private_path(checked['report']))
             fresh=daily_check.evaluate(observation,day)
@@ -138,7 +202,7 @@ def execute(config, run_id, execute=False, decisions=None, action=None, recovery
                 save(path,state);return state
             if not report['ready_to_format']:
                 # Only semantic identity issues can go to the agent. Missing drafts and login failures are final check outcomes.
-                semantic=bool(report['issues']) and all(i['code'] in ('identity_or_week_unresolved','multiple_versions_unresolved','identity_match_reason_missing') for i in report['issues'])
+                semantic=bool(report['issues']) and all(i['code'] in SEMANTIC_IDENTITY_ISSUES for i in report['issues'])
                 if semantic:
                     with daily_run.local_lock(uuid.uuid4().hex):
                         ledger=daily_run.Ledger(config,day,'full-body-'+uuid.uuid4().hex)
@@ -213,6 +277,7 @@ def execute(config, run_id, execute=False, decisions=None, action=None, recovery
                         evidence=[p for a in formatted for p in a['evidence_paths']]
                         ledger.checkpoint('ready_for_review','format_verified',evidence,run_id)
                 finally:state['handoff']=ledger.finish();save(path,state)
+            transfer_registry.reserve(config['xiumi_account'],run_id,formatted)
             sync_run='full-'+hashlib.sha256(run_id.encode()).hexdigest()[:24]
             state['sync_run']=sync_run;save(path,state)
             plan={'date':day,'composer_url':config['composer_url'],'target_account':config['target_account'],
@@ -235,7 +300,9 @@ def execute(config, run_id, execute=False, decisions=None, action=None, recovery
             state.update(phase='failed',error_code=getattr(exc,'code',type(exc).__name__))
             save(path,state);log.result('failed',protected=True)
             # Send only actual failure, no invented counts or completion state.
-            if execute and not state.get('notification_intent'):
+            # A fatal stop ends the run either way, so a preview must also leave a retrievable
+            # alert: otherwise a blocked run is indistinguishable from a run that never started.
+            if not state.get('notification_intent'):
                 msg=notify_wecom.notification_heading({'date':day,'run_id':run_id})+'\n执行中断：'+state['error_code']+'。\n整理或转存结果尚未全部确认；保留检查点，不重放未知操作。'
                 state['notification']=send_notification(folder,state,msg);save(path,state)
             raise

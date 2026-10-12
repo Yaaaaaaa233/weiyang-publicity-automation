@@ -83,7 +83,7 @@ class WecomNotificationTests(unittest.TestCase):
     def test_historical_alert_is_distinguished_from_current_business(self):
         report = {'date': '2026-09-21', 'run_date': '2026-10-04', 'historical_test': True,
                   'status': 'needs_attention', 'needs_attention': True,
-                  'issues': [{'code': 'headline_unresolved'}]}
+                  'issues': [{'code': 'headline_conflict_multiple'}]}
         observation = {'date': '2026-09-21', 'reservation': {'articles': []}}
         text = alert_from_report(report, observation)
         self.assertIn('历史测试', text)
@@ -145,6 +145,42 @@ class WecomNotificationTests(unittest.TestCase):
         self.assertLess(text.index('预约甲（头条）'), text.index('2、预约乙'))
         self.assertIn('已校验基础格式并转存到微信公众号草稿箱', text)
         self.assertIn('乙的正式题名', text)
+
+    def test_multiple_headline_alert_names_the_ambiguity(self):
+        """A multi-headline stop must say the order is ambiguous, not that none is marked."""
+        report = {'date': '2026-10-05', 'run_date': '2026-10-05', 'status': 'needs_attention',
+                  'needs_attention': True, 'issues': [{'code': 'headline_conflict_multiple'}]}
+        observation = {'date': '2026-10-05', 'reservation': {'articles': []}}
+        text = alert_from_report(report, observation)
+        self.assertIn('预约表标注了多个头条，顺序无法确定', text)
+        self.assertNotIn('头条标记未确定', text)
+
+    def test_completion_accepts_an_unmarked_day_in_sheet_order(self):
+        """Operator decision 2026-10-12: zero headlines completes on row order.
+
+        The reported order has to be the row order the fallback produces, and the
+        finished message has to say which order was used instead of leaving the
+        reader to guess whether a headline decision went missing.
+        """
+        report, observation, completion = self.completion_fixture()
+        for article in observation['reservation']['articles']:
+            article['is_headline'] = False
+        report = evaluate(observation, '2026-10-05', datetime.fromisoformat('2026-10-05T15:15:00+08:00'))
+        self.assertEqual(report['ordered_rows'], [6, 7])
+        # The fixture also carries a title difference, so select rather than assume.
+        self.assertIn('headline_absent_sheet_order', [w['code'] for w in report['warnings']])
+        completion['sync']['ordered_draft_ids'] = ['copy-6', 'copy-7']
+        text = completion_from_report(report, observation, completion)
+        self.assertIn('预约表未标注头条', text)
+        self.assertIn('从上到下的顺序', text)
+        self.assertNotIn('（头条）', text)
+
+    def test_completion_still_refuses_a_multi_headline_order(self):
+        report, observation, completion = self.completion_fixture()
+        for article in observation['reservation']['articles']:
+            article['is_headline'] = True
+        with self.assertRaises(ValueError):
+            completion_from_report(report, observation, completion)
 
     def test_submission_alone_does_not_claim_sync_completed(self):
         report, observation, completion = self.completion_fixture()

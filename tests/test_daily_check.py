@@ -62,7 +62,7 @@ class DailyCheckTests(unittest.TestCase):
     def test_duplicate_versions_cannot_be_selected_by_title(self):
         candidates = self.observation['xiumi']['matches'][0]['candidates']
         candidates.append(dict(candidates[0], id='second-version'))
-        self.assertEqual(self.result()['issues'], [{'code': 'multiple_versions_unresolved', 'row': 6}])
+        self.assertEqual(self.result()['issues'], [{'code': 'candidate_identity_unresolved', 'row': 6}])
 
     def test_one_draft_cannot_satisfy_two_bookings(self):
         self.observation['xiumi']['matches'][1]['candidates'][0]['id'] = '6'
@@ -103,12 +103,81 @@ class DailyCheckTests(unittest.TestCase):
         self.observation['reservation']['articles'] = []
         self.assertEqual(self.result()['status'], 'check_failed')
 
-    def test_missing_headline_or_unresolved_remarks_blocks(self):
-        self.observation['reservation']['articles'][2]['is_headline'] = False
-        self.assertFalse(self.result()['ready_to_format'])
-        self.observation['reservation']['articles'][2]['is_headline'] = True
+    def test_unmarked_headline_falls_back_to_sheet_order(self):
+        """Operator decision 2026-10-12: a day that marks no headline is not a stop.
+
+        The sheet asks for the ordinary top-to-bottom order, so the round proceeds on
+        row order and records a non-blocking warning naming the order source.
+        """
+        for article in self.observation['reservation']['articles']:
+            article['is_headline'] = False
+        result = self.result()
+        self.assertTrue(result['ready_to_format'])
+        self.assertFalse(result['needs_attention'])
+        self.assertEqual(result['issues'], [])
+        self.assertEqual(result['ordered_rows'], [6, 7, 8])
+        self.assertEqual([w['code'] for w in result['warnings']], ['headline_absent_sheet_order'])
+
+    def test_multiple_headlines_still_block(self):
+        """Two marked headlines stay a stop: no fallback may invent which one leads."""
+        self.observation['reservation']['articles'][0]['is_headline'] = True
+        result = self.result()
+        self.assertFalse(result['ready_to_format'])
+        self.assertEqual(result['issues'], [{'code': 'headline_conflict_multiple'}])
+
+    def test_unresolved_remarks_still_block(self):
         self.observation['reservation']['conflicts_resolved'] = False
         self.assertFalse(self.result()['ready_to_format'])
+
+    def test_headline_warning_survives_a_run_that_stops_for_identity(self):
+        """The order source is recorded even when another issue stops the round."""
+        for article in self.observation['reservation']['articles']:
+            article['is_headline'] = False
+        candidates = self.observation['xiumi']['matches'][0]['candidates']
+        candidates.append(dict(candidates[0], id='second-version'))
+        result = self.result()
+        self.assertEqual(result['issues'], [{'code': 'candidate_identity_unresolved', 'row': 6}])
+        self.assertEqual([w['code'] for w in result['warnings']], ['headline_absent_sheet_order'])
+
+    def test_20261012_shape_defers_only_the_ambiguous_row(self):
+        """Replay of the real 2026-10-12 stop, with every real blocker accounted for.
+
+        The 17:00 round reported three issues.  Two were the headline gate and its
+        derivative remarks text; the third was a genuine title ambiguity on the first
+        row (a sheet-side 样/羊 style difference) that must still be settled from the
+        body.  One unmarked row is given thirty candidates so the ambiguity is real.
+        """
+        reservation = self.observation['reservation']
+        reservation['articles'] = [
+            {'row': 7, 'title': '示例样题丨第五周', 'is_headline': False, 'remarks': ''},
+            {'row': 8, 'title': '示例甲题', 'is_headline': False, 'remarks': ''},
+            {'row': 9, 'title': '示例乙题', 'is_headline': False, 'remarks': ''}]
+        matches = []
+        for row in (7, 8, 9):
+            title = {7: '示例样题丨第五周', 8: '示例甲题', 9: '示例乙题'}[row]
+            candidates = [{'id': str(row), 'title': title, 'identity_confirmed': row != 7}]
+            if row == 7:
+                # Unconfirmed near-misses, exactly like the returned 30-candidate row.
+                candidates += [{'id': '7-' + str(i), 'title': '示例羊题丨第五周',
+                                'identity_confirmed': False} for i in range(3)]
+            matches.append({'row': row, 'candidates': candidates})
+        self.observation['xiumi']['matches'] = matches
+        result = self.result()
+        self.assertEqual(result['status'], 'needs_attention')
+        self.assertEqual(result['issues'], [{'code': 'candidate_identity_unresolved', 'row': 7}])
+        self.assertEqual(result['ordered_rows'], [7, 8, 9])
+        self.assertEqual([w['code'] for w in result['warnings']], ['headline_absent_sheet_order'])
+
+    def test_only_the_semantic_identity_path_may_answer_that_issue(self):
+        """The surviving issue set must be what full_run's body-review gate admits."""
+        from scripts.full_run import SEMANTIC_IDENTITY_ISSUES
+        self.assertEqual(SEMANTIC_IDENTITY_ISSUES,
+                         ('identity_or_week_unresolved', 'candidate_identity_unresolved',
+                          'identity_match_reason_missing'))
+        # The headline fallback must never become a body-review request: it is settled
+        # by falling back to sheet order, not by asking an agent to choose a lead.
+        self.assertNotIn('headline_absent_sheet_order', SEMANTIC_IDENTITY_ISSUES)
+        self.assertNotIn('headline_conflict_multiple', SEMANTIC_IDENTITY_ISSUES)
 
     def test_incomplete_search_blocks_even_with_all_matches(self):
         self.observation['xiumi']['search_complete'] = False

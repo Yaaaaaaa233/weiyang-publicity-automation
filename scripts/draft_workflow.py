@@ -23,6 +23,28 @@ BAD_SEPARATOR = re.compile(r'\s*[|｜]\s*')
 TITLE_SEPARATOR = re.compile(r'\s*[|｜丨]\s*')
 CREDIT = re.compile(r'^(策划|文案|文字|供稿|编辑|排版|摄影|审核|责编|审校)\s*[|｜丨]')
 
+# Xiumi titles a save-as copy `<source title> - 拷贝`, and a copy made from a copy
+# repeats the suffix, so a freshly created copy is **never** titled exactly like its
+# source. Requiring that exact match rejected every real save-as and hard-stopped the
+# 2026-10-10 run on `copy_title_changed`, with no test covering the behaviour. Only an
+# inherited title (optionally with repeated suffixes) is safe to rename; anything else
+# means a person edited that manuscript, and it must still never be overwritten.
+COPY_SUFFIX = ' - 拷贝'
+
+# A managed-copy marker is how a *test* copy is kept out of candidate matching by title.
+# A production copy must not carry one: the copy is what gets composed and synced, so the
+# marker would become the reader-visible article title. An empty marker is therefore the
+# production mode — the copy keeps the source title (only the separator is normalised) and
+# is excluded by **id** through the private transfer registry instead of by title.
+COPY_MARKERS = ('【自动整理','【全流程验证','【定时验证','【排版验证','【同步验证')
+
+def inherited_title(observed, source_title):
+    """True when a save-as copy still carries only its inherited title."""
+    if not source_title or not isinstance(observed,str) or not observed.startswith(source_title):
+        return False
+    rest = observed[len(source_title):]
+    return rest=='' or (rest.startswith(COPY_SUFFIX) and rest.replace(COPY_SUFFIX,'')=='')
+
 def fingerprint(value):
     return hashlib.sha256(json.dumps(value,ensure_ascii=False,sort_keys=True).encode()).hexdigest()
 
@@ -77,6 +99,87 @@ def content(snapshot):
 def body_signature(value):
     return fingerprint({k:value[k] for k in ('text','paragraphs','images','backgrounds')})
 
+TITLE_PLACEHOLDER = '请输入图文的标题'
+# How many ancestors above the vessel to try before giving up and reading the whole page. The
+# measured case on 2026-10-12 needed 5, so this is generous while staying bounded.
+SCOPE_ESCALATIONS = 12
+
+
+def title_input(nodes):
+    """The editor's title input. Note this is NOT the library search box (`输入标题或描述`)."""
+    return one(nodes, lambda n: n.get('tag') == 'input'
+               and n.get('placeholder') == TITLE_PLACEHOLDER, 'draft_title_missing')
+
+
+def body_scope(browser, identifier):
+    """Find the narrowest ancestor that holds BOTH the body vessel and the title input.
+
+    A whole-page read is capped at 3000 visible elements, and the 2026-10-12 18:10 round died there
+    (`truncated_page`) on a large compilation draft. Reading a narrower root keeps the article, its
+    title and its cover metadata in scope while leaving out the editor chrome (asset panels,
+    dialogs, toolbars) that pushed the page over the cap.
+
+    The root must contain the TITLE INPUT, not just the vessel: they are separate subtrees, and
+    returning the vessel's parent alone makes content() raise draft_title_missing. The 2026-10-12
+    probe measured the vessel's parent at 2204 elements WITHOUT the title, and the shared ancestor
+    at 2250 elements WITH it -- both under the cap.
+
+    Walks upward from the vessel's parent until both are present, so the scope is discovered from
+    the live page instead of hard-coded selectors. Returns None when no usable root is found, in
+    which case the caller reads the whole page -- the old behaviour, which still fails closed.
+    """
+    probe = browser.snapshot(selector='.tn-page-vessel')
+    vessel = next((n for n in probe.get('nodes', []) if has_class(n, 'tn-page-vessel')), None)
+    if not vessel:
+        return None
+    parts = [p for p in str(vessel.get('selector', '')).split(' > ') if p]
+    # The bridge's positional path contains tags/nth-of-type, never class names.
+    # We already identified the vessel by its class in the node object: its path
+    # ends at that node, so dropping the final segment gives its parent.
+    vessel_index = len(parts) - 1
+    if vessel_index < 2:
+        return None
+    # The title is a separate, tiny subtree. Its positional path gives the
+    # common ancestor without repeatedly collecting the entire large vessel.
+    title_probe = browser.snapshot(selector=TITLE)
+    titles = [n for n in title_probe.get('nodes', [])
+              if n.get('tag')=='input' and n.get('placeholder')==TITLE_PLACEHOLDER]
+    if len(titles)==1 and titles[0].get('selector'):
+        title_parts = titles[0]['selector'].split(' > ')
+        common = []
+        for left, right in zip(parts, title_parts):
+            if left != right:
+                break
+            common.append(left)
+        if common and len(common)<len(parts) and not re.fullmatch(
+                r'(?:html|body)(?:\:nth-of-type\(\d+\))?', common[-1]):
+            candidate = ' > '.join(common)
+            nodes = browser.snapshot(selector=candidate).get('nodes', [])
+            if (sum(has_class(n,'tn-page-vessel') for n in nodes)==1 and
+                sum(n.get('tag')=='input' and n.get('placeholder')==TITLE_PLACEHOLDER
+                    for n in nodes)==1):
+                return candidate
+    # parts[:index] is the path to the ancestor that contains the vessel when index == vessel_index
+    # (the parent), decreasing by one level per step. The loop stops at index 2, so `body` (index 1)
+    # is never a candidate: the shallowest scope this can return is `body > <one child>`. That is
+    # deliberate -- `body` is the whole page, the very read that overflowed, so returning it would
+    # look like a fix while changing nothing.
+    for index in range(vessel_index, max(1, vessel_index-SCOPE_ESCALATIONS), -1):
+        candidate = ' > '.join(parts[:index])
+        if re.fullmatch(r'body(?:\:nth-of-type\(\d+\))?', parts[index-1]):
+            break  # Real bridge paths include html; html > body is still the whole page.
+        # A larger ancestor cannot repair a truncated subtree. Preserve that fault.
+        snapshot = browser.snapshot(selector=candidate)
+        nodes = snapshot.get('nodes', [])
+        if all(n.get('tag') != 'input' or n.get('placeholder') != TITLE_PLACEHOLDER
+               for n in nodes):
+            continue                         # the title input is not in here, climb higher
+        if next((n for n in nodes if has_class(n, 'tn-page-vessel')), None) is None:
+            continue                         # the title is here but the vessel is not
+        return candidate
+    return None
+
+
 def snapshot_body(browser, identifier):
     def ready(s):
         try:
@@ -85,11 +188,16 @@ def snapshot_body(browser, identifier):
             if exc.code not in ('body_images_loading','draft_title_missing','body_vessel_ambiguous','draft_location_invalid'):
                 raise
             return False
-    first=browser.wait(ready)
+    # Discover scope from the vessel/title paths, then do every poll against it. The scope
+    # is fixed for the life of the page, so discovering it once is enough; a failure to identify it
+    # is not fatal, it just means the whole page is read as before.
+    scope = body_scope(browser, identifier)
+    read = (lambda: browser.snapshot(selector=scope)) if scope else browser.snapshot
+    first=browser.wait(ready, read=read)
     previous=content(first)
     deadline=time.monotonic()+30
     while time.monotonic()<deadline:
-        current_snapshot=browser.snapshot(); current=content(current_snapshot)
+        current_snapshot=read(); current=content(current_snapshot)
         if current['id']==identifier and body_signature(current)==body_signature(previous) and current['title']==previous['title']:
             return current_snapshot,current
         previous=current;time.sleep(.4)
@@ -99,14 +207,38 @@ def observe(browser, candidate):
     if paper_id(candidate['url']) != candidate['id']:
         raise Stop('draft_identity_changed','Candidate location differs from observed ID')
     opened=browser.command('new-window',candidate['url'])
-    snapshot,value=snapshot_body(browser,candidate['id'])
-    if value['title']!=candidate['title']:
-        raise Stop('draft_identity_changed','Candidate title changed since library scan')
-    path=write(browser.folder/('body-'+candidate['id']+'-'+uuid.uuid4().hex+'.json'),value)
-    browser.evidence.append(str(path.relative_to(ROOT)))
-    browser.command('screenshot','body-'+candidate['id']+'-'+uuid.uuid4().hex+'.png')
-    browser.command('close-window',opened['handle'],'--expect-url',snapshot['url'],'--return-to',opened['previous_handle'])
-    return value,str(path.relative_to(ROOT))
+    failure = None
+    try:
+        snapshot,value=snapshot_body(browser,candidate['id'])
+        if value['title']!=candidate['title']:
+            raise Stop('draft_identity_changed','Candidate title changed since library scan')
+        path=write(browser.folder/('body-'+candidate['id']+'-'+uuid.uuid4().hex+'.json'),value)
+        browser.evidence.append(str(path.relative_to(ROOT)))
+        browser.command('screenshot','body-'+candidate['id']+'-'+uuid.uuid4().hex+'.png')
+        return value,str(path.relative_to(ROOT))
+    except Exception as exc:
+        failure = exc
+        raise
+    finally:
+        try:
+            browser.command('switch-window', opened['handle'])
+            current = browser.command('observe')
+            if paper_id(current['url']) != candidate['id']:
+                raise Stop('cleanup_identity_changed', 'Keep the window for inspection')
+            browser.command('close-window',opened['handle'],'--expect-url',current['url'],
+                            '--return-to',opened['previous_handle'])
+        except Exception as exc:
+            if failure is None:
+                raise
+            # Record cleanup failure without hiding the original collection fault.
+            try:
+                path = write(browser.folder/('cleanup-'+uuid.uuid4().hex+'.json'),
+                             {'status':'not_closed','error':getattr(exc,'code',type(exc).__name__),
+                              'handle':opened['handle']})
+                browser.evidence.append(str(path.relative_to(ROOT)))
+            except Exception as record_error:
+                if hasattr(failure, 'add_note'):
+                    failure.add_note('Cleanup evidence unavailable: '+type(record_error).__name__)
 
 def format_issues(value, rules):
     """Require evidenced head/tail identities. Dimensions alone never confirm the artwork."""
@@ -155,8 +287,8 @@ def preservation(before, after, rules=None):
 class Drafts:
     def __init__(self, browser, folder, account, day, marker, rules, known_ids=None):
         self.browser=browser;self.folder=private_path(folder);self.folder.mkdir(parents=True,exist_ok=True)
-        if not marker or len(marker)>60 or not marker.startswith(('【自动整理','【全流程验证','【定时验证','【排版验证','【同步验证')):
-            raise ValueError('Use a short managed-copy marker so generated copies stay excluded from candidates')
+        if marker is None or not isinstance(marker,str) or len(marker)>60 or (marker and not marker.startswith(COPY_MARKERS)):
+            raise ValueError('Use a short managed-copy marker for a test copy, or an empty marker so a production copy keeps the source title; copies are still excluded by id through the private transfer registry')
         self.marker=marker;self.rules=rules;self.known_ids=set(known_ids or [])
         for p in rules.get('evidence_paths',[]):
             if not private_path(p).is_file():raise ValueError('Missing format rule evidence')
@@ -216,7 +348,7 @@ class Drafts:
         if value['title']!=record['expected_title']:
             if record['phase']=='save_intent':
                 raise Stop('save_outcome_unknown','Saved title is not confirmed; do not repeat a rename')
-            if value['title']!=baseline['title']:
+            if not inherited_title(value['title'],baseline['title']):
                 raise Stop('copy_title_changed','Unexpected title; do not overwrite')
             changed=True
             self.browser.command('focus',TITLE);self.browser.command('key','SelectAll')
@@ -356,7 +488,8 @@ class Drafts:
             raise Stop('copy_recovery_invalid','Copy already belongs to another source')
         self.browser.command('open',editor_url(identifier))
         _,value=snapshot_body(self.browser,identifier);baseline=read(private_path(record['baseline']))
-        if value['title'] not in (baseline['title'],record['expected_title']) or not preservation(baseline,value,self.rules):
+        accepted = value['title']==record['expected_title'] or inherited_title(value['title'],baseline['title'])
+        if not accepted or not preservation(baseline,value,self.rules):
             raise Stop('copy_recovery_invalid','Recovered copy does not match baseline')
         record.update(copy_id=identifier,phase='copy_recovered');self.persist()
 

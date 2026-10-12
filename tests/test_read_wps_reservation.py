@@ -98,6 +98,13 @@ class WpsTests(unittest.TestCase):
             self.payload['generated_at'] = stamp
             with self.assertRaises(ValueError): self.convert()
 
+    def test_small_clock_skew_tolerated_but_real_future_still_rejected(self):
+        """generated_at is stamped by the WPS cloud clock; seconds of skew must not fail the gate."""
+        self.payload['generated_at'] = '2026-10-04T14:05:02Z'   # 2s ahead of the host clock
+        self.assertEqual(self.convert()['status'], 'ok')
+        self.payload['generated_at'] = '2026-10-04T14:07:30Z'   # 2.5min ahead: beyond the allowance
+        with self.assertRaises(ValueError): self.convert()
+
     def test_multiple_dates_and_scan_mismatch_rejected(self):
         self.payload['matches'].append(copy.deepcopy(self.payload['matches'][0]))
         with self.assertRaises(ValueError): self.convert()
@@ -112,11 +119,99 @@ class WpsTests(unittest.TestCase):
         self.payload['matches'][0]['rows'][0]['cells'][9] = '示例备注'
         self.assertFalse(self.convert()['conflicts_resolved'])
 
-    def test_multiple_or_unknown_headlines_require_review(self):
+    def test_multiple_headlines_require_review(self):
         self.payload['matches'][0]['rows'][0]['cells'][3] = '是'
-        self.assertFalse(self.convert()['conflicts_resolved'])
+        result = self.convert()
+        self.assertFalse(result['conflicts_resolved'])
+        self.assertIn('headline_conflict_multiple', result['issues'])
+        self.assertEqual(result['ordered_rows'], [])
+
+    def test_unknown_headline_marker_is_a_data_error(self):
         self.payload['matches'][0]['rows'][0]['cells'][3] = '待定'
-        self.assertFalse(self.convert()['conflicts_resolved'])
+        result = self.convert()
+        self.assertFalse(result['conflicts_resolved'])
+        self.assertIn({'code': 'unknown_headline', 'row': 6}, result['issues'])
+
+    def test_unmarked_day_resolves_to_sheet_order(self):
+        """Operator decision 2026-10-12: no marked headline is not a conflict.
+
+        EVERY headline marker is cleared, not just one.  Clearing a single marker leaves
+        the fixture still holding exactly one headline, which passes for the wrong reason
+        and hid a real defect: the reader kept `conflicts_resolved` false, ordered_rows
+        stayed empty, and the checker then reported the derivative
+        `reservation_remarks_or_order_unresolved` for a sheet whose remarks are empty.
+        """
+        for row in self.payload['matches'][0]['rows']:
+            row['cells'][3] = ''
+        result = self.convert()
+        self.assertTrue(result['conflicts_resolved'])
+        self.assertEqual(result['issues'], [])
+        self.assertEqual(result['ordered_rows'], [6, 7, 8])
+
+    def test_unmarked_day_end_to_end_does_not_report_a_remarks_conflict(self):
+        """The real-reader-to-real-checker path for an unmarked day.
+
+        This is the regression for the defect above: it feeds the payload through the real
+        reader and then the real checker, so a reader that withholds conflicts_resolved (or
+        ordered_rows) fails here instead of only in production.
+        """
+        for row in self.payload['matches'][0]['rows']:
+            row['cells'][3] = ''
+        reservation = self.convert()
+        # Titles must equal the reservation titles exactly; a reused placeholder would
+        # raise identity_match_reason_missing and mask the claim under test.
+        titles = {a['row']: a['title'] for a in reservation['articles']}
+        xiumi = {'status': 'ok', 'account_confirmed': True, 'search_complete': True,
+                 'evidence_paths': ['local/fixture.json'],
+                 'matches': [{'row': r, 'candidates': [{'id': str(r), 'title': titles[r],
+                                                        'identity_confirmed': True}]}
+                             for r in (6, 7, 8)]}
+        observation = {'date': '2026-10-04', 'timezone': 'Asia/Shanghai',
+                       'observed_at': self.payload['generated_at'],
+                       'reservation': reservation, 'xiumi': xiumi}
+        report = evaluate(observation, '2026-10-04', self.now)
+        codes = [item['code'] for item in report['issues']]
+        self.assertEqual(codes, [])
+        self.assertTrue(report['ready_to_format'])
+        self.assertEqual(report['ordered_rows'], [6, 7, 8])
+        self.assertEqual([w['code'] for w in report['warnings']], ['headline_absent_sheet_order'])
+
+    def test_unmarked_day_order_is_by_row_not_by_input_position(self):
+        """The fallback is defined by row number, not by the order rows arrived in.
+
+        The rows must stay in row order on the wire (the reader rejects a reordered
+        date block), so this assigns each row's content in reverse to prove the order
+        comes from the row numbers rather than from the sequence of article records.
+        """
+        rows = self.payload['matches'][0]['rows']
+        originals = copy.deepcopy(rows[:3])
+        for index, row in enumerate(rows[:3]):
+            source = originals[2 - index]['cells']
+            row['cells'][1:3] = [source[1], source[2]]
+            row['cells'][3] = ''
+        result = self.convert()
+        self.assertEqual([a['row'] for a in result['articles']], [6, 7, 8])
+        self.assertEqual([a['title'] for a in result['articles']],
+                         ['示例推送😀2', '示例推送😀1', '示例推送😀0'])
+        self.assertEqual(result['ordered_rows'], [6, 7, 8])
+
+    def test_articles_always_arrive_in_row_order(self):
+        """The invariant that makes an explicit ordered_rows sort equivalent.
+
+        ordered_rows used to be built by partitioning the article list in place, which
+        is correct only while that list is itself in row order.  The reader enforces
+        that order while parsing, so an explicit sort cannot change any reachable
+        result -- and the explicit form cannot silently depend on the invariant either.
+        This case pins the invariant so the equivalence is checked, not assumed.
+        """
+        rows = self.payload['matches'][0]['rows']
+        for index, row in enumerate(rows):
+            row['cells'][1] = '虚构部门'
+            row['cells'][2] = '示例稿件' + str(index)
+            if index:
+                row['cells'][3] = ''
+        self.convert()  # the reader itself refuses a reordered block
+        self.assertEqual([a['row'] for a in self.convert()['articles']], list(range(6, 14)))
 
     def test_instruction_semantics_not_auto_approved(self):
         result = reservation_from_payload(self.payload, '2026-10-04', ['local/logs.json'], self.now)

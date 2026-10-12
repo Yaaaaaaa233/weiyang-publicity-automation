@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 import copy
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -34,6 +35,20 @@ class ClickTests(unittest.TestCase):
             call,calls=self.driver(specs,changed)
             with patch.object(browser,'call',call),self.assertRaises(browser.BrowserError):browser.click_element('sid','cards','target')
             self.assertFalse(any(p.endswith('/click') for _,p in calls))
+    def test_hover_moves_pointer_over_one_element_without_click(self):
+        calls=[]
+        def call(method,path,body=None):
+            calls.append((method,path,body))
+            if path.endswith('/elements'):return [{browser.ELEMENT_KEY:'card-1'}]
+            if path.endswith('/displayed'):return True
+            return None
+        with patch.object(browser,'call',call):browser.hover_element('sid','div.show-item')
+        actions=[body for method,path,body in calls if path.endswith('/actions')]
+        self.assertEqual(len(actions),1)
+        move=actions[0]['actions'][0]['actions'][0]
+        self.assertEqual(move['type'],'pointerMove')
+        self.assertEqual(move['origin'],{browser.ELEMENT_KEY:'card-1'})
+        self.assertFalse(any(path.endswith('/click') for _,path,_ in calls))
 
 class NotificationBatchTests(unittest.TestCase):
     def setUp(self):
@@ -188,6 +203,7 @@ class FullRunRecoveryTests(unittest.TestCase):
                             'saved_reopened':True,'body_images_verified':True,'format_verified':True,'evidence_paths':['local/proof.json']}
             def sync(command,run,**kwargs):
                 events.append(('sync',command));p=root/'local/sync-workflow'/run/'state.json';p.parent.mkdir(parents=True,exist_ok=True)
+                if command=='observe-result':return json.loads(p.read_text())
                 state={'phase':'prepared','submission_reserved':False,'sync_attempt_count':0,'handoff_path':'local/proof.json'}
                 if command=='submit':
                     state.update(phase='awaiting_confirmation',submission_reserved=True,sync_attempt_count=1)
@@ -213,6 +229,52 @@ class FullRunRecoveryTests(unittest.TestCase):
         articles=[{'row':1,'title':'体育丨比赛报名','unit':'体育部'}]
         copies=[{'id':str(i),'title':prefix+'体育丨比赛报名'} for i,prefix in enumerate(('【自动整理20260101】','【全流程验证1007】'))]
         self.assertEqual(match_candidates(articles,copies)[0]['candidates'],[])
+
+class BrowserImageDriftTests(unittest.TestCase):
+    """The image bakes browser.py, so a stale copy must be named and blocked, not buried."""
+    def test_stale_subcommand_is_named_as_a_deployment_fault(self):
+        from scripts import browserctl
+        usage=("usage: browser.py [-h] [--lease-token L] {status,start,observe} ...\n"
+               "browser.py: error: argument command: invalid choice: 'close-window' "
+               "(choose from 'status', 'start', 'observe')")
+        self.assertEqual(browserctl.classify_failure(usage),'browser_image_stale')
+        self.assertEqual(browserctl.classify_failure('Artifact retrieval failed'),'host bridge error')
+    def test_stale_container_copy_blocks_and_records_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve();(root/'local').mkdir()
+            stale={'repository_sha256':'a'*64,'container_sha256':'b'*64,'match':False}
+            current={'repository_sha256':'a'*64,'container_sha256':'a'*64,'match':True}
+            healed={'done':False};seen=[]
+            def bridge(*args,**kwargs):
+                seen.append(args)
+                if args==('doctor','--heal'):healed['done']=True;return current
+                return current if healed['done'] else stale
+            with patch.object(check_runtime,'ROOT',root),patch.object(check_runtime,'bridge',bridge), \
+                 patch.dict(os.environ,{'WEIYANG_BROWSER_SELFHEAL':'0'}):
+                check_runtime.IMAGE_STATE.update(checked=False,result=None)
+                with self.assertRaises(Stop) as caught:check_runtime.browser_image_preflight()
+                self.assertEqual(caught.exception.code,'browser_image_stale')
+                records=list((root/'local/browser-image-drift').glob('drift-*.json'))
+                self.assertEqual(len(records),1)
+                self.assertEqual(json.loads(records[0].read_text(encoding='utf-8'))['container_sha256'],'b'*64)
+                self.assertEqual(seen,[('doctor',)])
+            seen.clear()
+            with patch.object(check_runtime,'ROOT',root),patch.object(check_runtime,'bridge',bridge):
+                check_runtime.IMAGE_STATE.update(checked=False,result=None)
+                self.assertTrue(check_runtime.browser_image_preflight()['match'])
+                self.assertEqual(seen,[('doctor',),('doctor','--heal'),('doctor',)])
+                self.assertTrue(check_runtime.browser_image_preflight()['match'])
+                self.assertEqual(len(seen),3)
+    def test_lease_acquisition_runs_the_preflight_before_any_browser_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve();(root/'local').mkdir()
+            order=[]
+            with patch.object(check_runtime,'ROOT',root), \
+                 patch.object(check_runtime,'browser_runtime_preflight',side_effect=lambda *a,**k:order.append('runtime')), \
+                 patch.object(check_runtime,'browser_image_preflight',side_effect=lambda *a,**k:order.append('preflight')), \
+                 patch.object(check_runtime.Browser,'command',side_effect=lambda *a,**k:order.append('command')):
+                with check_runtime.Browser('local/lease-fixture').reserved():pass
+            self.assertEqual(order,['runtime','preflight','command','command'])
 
 class ReportingAndIdentityTests(unittest.TestCase):
     def test_fresh_and_cached_tokens_have_separate_prices_and_missing_is_unknown(self):
@@ -248,7 +310,7 @@ class ReportingAndIdentityTests(unittest.TestCase):
         self.assertIn('iframe',driver.call_args.args[2]['script'])
 
 class CopyLifecycleTests(unittest.TestCase):
-    def fixture(self, uncertain=False, corrupt=False):
+    def fixture(self, uncertain=False, corrupt=False, copy_suffix=None, marker='【自动整理测试】'):
         from urllib.parse import urlsplit
         root=Path(self.tmp.name).resolve();proof=root/'local/proof.json';proof.parent.mkdir();proof.write_text(json.dumps(sample()))
         events=[]
@@ -272,9 +334,12 @@ class CopyLifecycleTests(unittest.TestCase):
                 if node['selector']=='saveas':
                     if uncertain:raise Stop('browser_command_timeout','unknown save-as')
                     self.current='2'
+                    # The platform titles a save-as copy `<source> - 拷贝` instead of
+                    # inheriting the source title verbatim.
+                    if copy_suffix:self.title=sample()['title']+copy_suffix
                 if node['selector']=='save':self.saved_title=self.title
             def wait(self,predicate):return {'url':d.editor_url(self.current)}
-        b=B()
+        b=B();self.browser=b
         def snapshot_body(browser,identifier):
             value=sample(identifier);value['title']=browser.title
             if corrupt and identifier=='2':value['images'][1]['width']=999
@@ -282,7 +347,7 @@ class CopyLifecycleTests(unittest.TestCase):
         patches=[patch.object(d,'ROOT',root),patch.object(check_runtime,'ROOT',root),
                  patch.object(d,'observe',return_value=(sample(),'local/proof.json')),patch.object(d,'snapshot_body',snapshot_body)]
         for p in patches:p.start();self.addCleanup(p.stop)
-        drafts=d.Drafts(b,root/'local/copies','fixture','2026-01-01','【自动整理测试】',
+        drafts=d.Drafts(b,root/'local/copies','fixture','2026-01-01',marker,
                        {'head_sources':['head'],'tail_sources':['tail'],'evidence_paths':['local/proof.json']},known_ids=['1','3'])
         return drafts,events
     def setUp(self):
@@ -310,6 +375,105 @@ class CopyLifecycleTests(unittest.TestCase):
         before=len(events)
         with self.assertRaises(Stop):drafts.attach('1','3')
         self.assertEqual(len(events),before)
+    def test_save_as_copy_title_suffix_is_renamed_instead_of_rejected(self):
+        """Xiumi titles a save-as copy `<source> - 拷贝`, so the copy is never titled
+        exactly like its source. Demanding that exact match hard-stopped the real
+        2026-10-10 run at the copy step and no test covered it."""
+        drafts,events=self.fixture(copy_suffix=' - 拷贝')
+        result=drafts.prepare({'row':1,'is_headline':True},{'id':'1','title':sample()['title']})
+        self.assertEqual(result['draft_id'],'2')
+        self.assertTrue(result['saved_reopened'])
+        self.assertIn('type',events)
+        self.assertEqual(events.count('click_save'),1)
+        self.assertEqual(self.browser.saved_title,'【自动整理测试】'+sample()['title'])
+        self.assertEqual(drafts.index['copies']['1']['phase'],'verified')
+    def test_repeated_copy_suffix_from_a_copy_of_a_copy_is_accepted(self):
+        drafts,events=self.fixture(copy_suffix=' - 拷贝 - 拷贝')
+        result=drafts.prepare({'row':1,'is_headline':True},{'id':'1','title':sample()['title']})
+        self.assertEqual(result['draft_id'],'2')
+        self.assertEqual(events.count('click_save'),1)
+    def test_an_edited_copy_title_is_still_never_overwritten(self):
+        drafts,events=self.fixture(copy_suffix=' 人工改过')
+        with self.assertRaises(Stop) as caught:
+            drafts.prepare({'row':1,'is_headline':True},{'id':'1','title':sample()['title']})
+        self.assertEqual(caught.exception.code,'copy_title_changed')
+        self.assertNotIn('type',events)
+        self.assertNotIn('click_save',events)
+    def test_a_suffixed_title_in_save_intent_is_still_an_unknown_save(self):
+        """Accepting the platform suffix must not weaken the branch that refuses to
+        repeat a rename whose save outcome was never observed."""
+        drafts,events=self.fixture(copy_suffix=' - 拷贝')
+        drafts.prepare({'row':1,'is_headline':True},{'id':'1','title':sample()['title']})
+        drafts.index['copies']['1']['phase']='save_intent';drafts.persist()
+        self.browser.saved_title=sample()['title']+' - 拷贝'
+        before=len(events)
+        with self.assertRaises(Stop) as caught:
+            drafts.prepare({'row':1,'is_headline':True},{'id':'1','title':sample()['title']})
+        self.assertEqual(caught.exception.code,'save_outcome_unknown')
+        self.assertNotIn('type',events[before:])
+    def test_attach_accepts_an_inherited_title(self):
+        drafts,events=self.fixture(uncertain=True)
+        with self.assertRaises(Stop):drafts.prepare({'row':1,'is_headline':True},{'id':'1','title':sample()['title']})
+        self.browser.title=sample()['title']+' - 拷贝'
+        drafts.attach('1','2')
+        self.assertEqual(drafts.index['copies']['1']['copy_id'],'2')
+        self.assertEqual(drafts.index['copies']['1']['phase'],'copy_recovered')
+    def test_attach_still_refuses_an_edited_title(self):
+        drafts,events=self.fixture(uncertain=True)
+        with self.assertRaises(Stop):drafts.prepare({'row':1,'is_headline':True},{'id':'1','title':sample()['title']})
+        self.browser.title=sample()['title']+' 人工改过'
+        with self.assertRaises(Stop) as caught:drafts.attach('1','2')
+        self.assertEqual(caught.exception.code,'copy_recovery_invalid')
+    def test_a_production_copy_keeps_the_source_title_with_no_reader_visible_prefix(self):
+        """A production copy must not carry a marker: the copy is what gets composed and
+        synced, so the marker would become the reader-visible article title (see
+        check_sync_composition, which compares the composer's title inputs to sync_title).
+        Copies stay excluded from candidates by id through the private transfer registry."""
+        drafts,events=self.fixture(copy_suffix=' - 拷贝',marker='')
+        result=drafts.prepare({'row':1,'is_headline':True},{'id':'1','title':sample()['title']})
+        self.assertEqual(result['sync_title'],sample()['title'])
+        self.assertEqual(result['sync_title'],drafts.index['copies']['1']['source_title'])
+        self.assertNotIn('【',result['sync_title'])
+        self.assertTrue(result['saved_reopened'])
+        self.assertEqual(events.count('click_save'),1)
+
+class CopyMarkerTests(unittest.TestCase):
+    """Only a test marker or an empty (production) marker is accepted."""
+    def test_only_test_markers_or_empty_are_accepted(self):
+        rules={'head_sources':['head'],'tail_sources':['tail'],'evidence_paths':[]}
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve();(root/'local').mkdir()
+            with patch.object(d,'ROOT',root),patch.object(check_runtime,'ROOT',root):
+                for bad in ('随手写的前缀','【别的标记】','x'*61,None):
+                    with self.subTest(marker=bad),self.assertRaises(ValueError):
+                        d.Drafts(None,root/'local/copies','fixture','2026-01-01',bad,rules)
+                for good in ('','【自动整理测试】','【同步验证x】'):
+                    with self.subTest(marker=good):
+                        self.assertEqual(
+                            d.Drafts(None,root/'local/copies','fixture','2026-01-01',good,rules).marker,good)
+
+class InheritedTitleTests(unittest.TestCase):
+    """The suffix rule is the whole contract, so pin it directly."""
+    def test_only_the_inherited_title_and_its_repeated_suffix_are_accepted(self):
+        source='栏目丨稿件'
+        for observed in (source, source+' - 拷贝', source+' - 拷贝 - 拷贝'):
+            self.assertTrue(d.inherited_title(observed,source),observed)
+        for observed in (source+' 手改', source+' - 拷贝手改', '别的标题',
+                         ' - 拷贝'+source, source+' - 拷', source+' - 拷贝 '):
+            self.assertFalse(d.inherited_title(observed,source),observed)
+    def test_an_empty_or_missing_source_title_accepts_nothing(self):
+        for observed in ('','x',' - 拷贝'):
+            self.assertFalse(d.inherited_title(observed,''))
+            self.assertFalse(d.inherited_title(observed,None))
+            self.assertFalse(d.inherited_title(None,'栏目丨稿件'))
+    def test_the_actual_20261010_stop_title_is_accepted(self):
+        """Pinned from the real incident: copy 730556517 came back titled like this and
+        the old exact-match guard hard-stopped the run at `copy_title_changed`."""
+        source='未央实践丨秋光漫染肩头，来一场学期中实践吧！'
+        observed='未央实践丨秋光漫染肩头，来一场学期中实践吧！ - 拷贝'
+        self.assertTrue(d.inherited_title(observed,source))
+        # The already-renamed managed title is handled by the expected-title branch.
+        self.assertFalse(d.inherited_title('【自动整理20261010】'+source,source))
 
 class NotificationIntentTests(unittest.TestCase):
     def test_local_receipt_failure_keeps_original_message_intent_and_blocks_alternate(self):

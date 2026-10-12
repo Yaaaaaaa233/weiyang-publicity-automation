@@ -12,6 +12,13 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 SHANGHAI = timezone(timedelta(hours=8))
 
+# Xiumi stops that are not login/account problems.  Reported by name so the operator
+# message states what actually happened instead of listing three ruled-out causes.
+XIUMI_STOP_ISSUES = {
+    'incomplete_library': 'xiumi_library_count_mismatch',
+    'library_changing': 'xiumi_library_changed_during_scan',
+}
+
 
 def evaluate(observation, expected_date, now=None, historical_test=False):
     now = now or datetime.now(SHANGHAI)
@@ -80,8 +87,15 @@ def evaluate(observation, expected_date, now=None, historical_test=False):
     if len(rows) != len(articles):
         raise ValueError('duplicate reservation rows')
     headlines = [a for a in articles if a['is_headline']]
-    if len(headlines) != 1:
-        issue('headline_unresolved')
+    # Operator decision 2026-10-12: no marked headline means the sheet asks for the
+    # ordinary top-to-bottom order, so it is recorded as a non-blocking warning and
+    # the round continues on row order (daily_check orders headlines first, then row,
+    # which degenerates to plain row order).  Two or more marked headlines remain a
+    # stop: that ordering is genuinely ambiguous and no fallback may invent a lead.
+    if len(headlines) > 1:
+        issue('headline_conflict_multiple')
+    elif not headlines:
+        warnings.append({'code': 'headline_absent_sheet_order'})
     if reservation.get('conflicts_resolved') is not True:
         issue('reservation_remarks_or_order_unresolved')
     xiumi = observation.get('xiumi', {})
@@ -89,9 +103,19 @@ def evaluate(observation, expected_date, now=None, historical_test=False):
         raise ValueError('xiumi must be an object')
     if (xiumi.get('status') != 'ok' or xiumi.get('account_confirmed') is not True
             or xiumi.get('search_complete') is not True):
+        # Name the actual stop.  The generic message lists three causes, so using it
+        # for a scan that was stopped by a library-integrity guard reports three things
+        # that the code has already ruled out.
         issue('xiumi_login_required' if xiumi.get('status') == 'login_required'
-              else 'xiumi_unavailable_wrong_account_or_incomplete_search')
+              else XIUMI_STOP_ISSUES.get(xiumi.get('error_code'),
+                                         'xiumi_unavailable_wrong_account_or_incomplete_search'))
         return report('check_failed')
+    for warning in xiumi.get('warnings', []):
+        # Non-blocking, but never swallowed: a tolerated library-count excess has to be
+        # visible in the report and in the notification, not only in the raw evidence.
+        if not isinstance(warning, dict) or not warning.get('code'):
+            raise ValueError('xiumi warnings need a code')
+        warnings.append(warning)
     if not isinstance(xiumi.get('evidence_paths'), list) or not xiumi['evidence_paths']:
         issue('xiumi_evidence_missing')
         return report('check_failed')
@@ -122,9 +146,15 @@ def evaluate(observation, expected_date, now=None, historical_test=False):
             continue
         candidates = by_row[row]
         if not candidates:
-            issue('manuscript_missing', row)
+            match=next(m for m in matches if m['row']==row)
+            if any(c['title']==article['title'] for c in match.get('processed_candidates',[])):
+                issue('already_transferred',row)
+            elif match.get('search_status')=='unmatched_conflicts_excluded':
+                issue('candidate_conflict_needs_review',row)
+            else:
+                issue('manuscript_missing',row)
         elif len(candidates) > 1:
-            issue('multiple_versions_unresolved', row)
+            issue('candidate_identity_unresolved', row)
         elif candidates[0]['identity_confirmed'] is not True:
             issue('identity_or_week_unresolved', row)
         else:

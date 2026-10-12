@@ -5,6 +5,8 @@
 config.local.*
 local/
 secrets/
+# Detailed private exploration history; contains manuscript locations and run records.
+HISTORY.md
 
 # Runtime state and unpublished content
 data/

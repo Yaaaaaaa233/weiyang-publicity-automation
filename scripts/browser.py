@@ -94,8 +94,15 @@ const nodes = elements.slice(0, 3000).map(e => ({
   placeholder:e.getAttribute('placeholder'), type:e.getAttribute('type'),
   own_text:[...e.childNodes].filter(n => n.nodeType === Node.TEXT_NODE)
     .map(n => n.textContent).join(' ').trim().slice(0, 500),
-  rendered_text:(e.innerText || '').slice(0, 12000),
-  rendered_text_truncated:(e.innerText || '').length > 12000,
+  // Per-node text cap. Raised 12000 -> 100000 on 2026-10-12: a large compilation draft has a body
+  // vessel whose innerText legitimately exceeds 12000, and because this slice keeps the BEGINNING,
+  // truncation silently dropped the TRAILING credit block -- the very lines normalized_credits()
+  // validates. The 18:10 round measured vessel text at 12000 (a full slice) on draft 730830179, so
+  // content() would have raised body_truncated even after the element-count wall was fixed by
+  // scoping the read. 100000 matches the whole-page `text` cap below, so the bound stays meaningful
+  // and the truncated flag still fails closed.
+  rendered_text:(e.innerText || '').slice(0, 100000),
+  rendered_text_truncated:(e.innerText || '').length > 100000,
   value:['INPUT','TEXTAREA'].includes(e.tagName) && e.type !== 'password' ? e.value : null,
   checked:e.tagName === 'INPUT' && ['checkbox','radio'].includes(e.type) ? e.checked : null,
   disabled:'disabled' in e ? Boolean(e.disabled) : null,
@@ -236,6 +243,22 @@ def click_element(sid, selector, expected_text):
     if call('GET', target + '/text').strip() != expected_text.strip() or not call('GET', target + '/displayed'):
         raise BrowserError('text mismatch', 'Element changed before dispatch.')
     call('POST', target + '/click', {})
+
+
+def hover_element(sid, selector):
+    """Move the real browser pointer onto one visible element; never clicks it."""
+    matches = call('POST', session_path(sid, '/elements'),
+                   {'using': 'css selector', 'value': selector})
+    if len(matches) != 1:
+        raise BrowserError('ambiguous hover', 'Hover selector must match exactly one element.')
+    target = session_path(sid, '/element/' + matches[0][ELEMENT_KEY])
+    if not call('GET', target + '/displayed'):
+        raise BrowserError('unavailable hover target', 'Hover target must be visible.')
+    call('POST', session_path(sid, '/actions'), {'actions': [{
+        'type': 'pointer', 'id': 'mouse', 'parameters': {'pointerType': 'mouse'},
+        'actions': [{'type': 'pointerMove', 'duration': 100,
+                     'origin': {ELEMENT_KEY: matches[0][ELEMENT_KEY]}, 'x': 0, 'y': 0}]
+    }]})
 
 
 def type_active(sid, text):
@@ -408,6 +431,8 @@ def main():
     p = sub.add_parser('click-element'); p.add_argument('selector')
     p.add_argument('--expect-text', required=True)
     p.add_argument('--frame')
+    p = sub.add_parser('hover-element'); p.add_argument('selector')
+    p.add_argument('--frame')
     p = sub.add_parser('check-empty'); p.add_argument('selector')
     p = sub.add_parser('copy-editor'); p.add_argument('selector'); p.add_argument('filename'); p.add_argument('--frame',required=True)
     p = sub.add_parser('new-window'); p.add_argument('url')
@@ -447,7 +472,7 @@ def main():
             return empty_component(sid,args.selector)
         if args.command == 'copy-editor':
             return copy_editor(sid,args.selector,args.filename,args.frame)
-        if args.command in ('focus','click-element','key') and args.frame:
+        if args.command in ('focus','click-element','hover-element','key') and args.frame:
             enter_frame(sid,args.frame)
         if args.command == 'new-window':
             # Open a separate composition without discarding the current window.
@@ -500,6 +525,10 @@ def main():
             click_element(sid, args.selector, args.expect_text)
             enter_frame(sid,None)
             return {'clicked': True, **observe(sid)}
+        if args.command == 'hover-element':
+            hover_element(sid, args.selector)
+            enter_frame(sid,None)
+            return {'hovered': True, **observe(sid)}
         if args.command == 'open':
             navigate(sid, args.url)
         elif args.command == 'reload':

@@ -149,16 +149,21 @@ def private_file(path):
 
 
 ISSUES = {
+    'already_transferred': '对应稿件已转存或已有提交预留（复核原任务，不重复转存）',
     'wps_login_required': 'WPS 登录异常，请重新登录预约表',
     'xiumi_login_required': '秀米登录异常，请重新登录常用收稿账号',
     'identity_match_reason_missing': '标题不同但同稿核验依据未记录',
-    'manuscript_missing': '未收到稿件', 'row_not_checked': '尚未完成核对',
-    'multiple_versions_unresolved': '同题多版本未确定',
+    'manuscript_missing': '未匹配到对应稿件（不代表未转存，需复核）',
+    'candidate_conflict_needs_review': '存在相近稿件但标题元数据冲突，需复核正文与周次',
+    'row_not_checked': '尚未完成核对',
+    'candidate_identity_unresolved': '存在多个相似候选，需结合正文核对（不代表同稿多版本）',
     'identity_or_week_unresolved': '稿件身份或周次未确定',
     'same_manuscript_for_multiple_reservations': '同一稿件被匹配给多条预约',
-    'headline_unresolved': '头条标记未确定',
+    'headline_conflict_multiple': '预约表标注了多个头条，顺序无法确定',
     'reservation_remarks_or_order_unresolved': '预约备注或顺序存在待确认事项',
     'xiumi_unavailable_wrong_account_or_incomplete_search': '秀米不可用、账号未确认或搜索不完整',
+    'xiumi_library_count_mismatch': '秀米稿件库条数与页面自报不一致，扫描器未取得完整性背书',
+    'xiumi_library_changed_during_scan': '秀米稿件库在扫描期间发生变化，扫描器未取得完整性背书',
     'xiumi_evidence_missing': '秀米核对证据缺失',
     'wrong_date_or_timezone': '观察日期或时区错误',
     'wrong_observation_date': '观察不是指定日期',
@@ -181,19 +186,70 @@ def notification_heading(report):
     return heading
 
 
-def title_warning_lines(report):
+NONBLOCKING_WARNINGS = ('title_difference_matched', 'duplicate_unlinked_card',
+                        'headline_absent_sheet_order')
+
+
+def title_difference_warnings(report):
+    """The title-difference subset of the report warnings.
+
+    Title differences carry a reservation row; a library-count warning does not, so
+    anything comparing title differences must select them first instead of assuming
+    every warning has a row.
+    """
+    return [w for w in report.get('warnings', []) if w.get('code') == 'title_difference_matched']
+
+
+def nonblocking_warning_lines(report):
+    """Render every non-blocking warning, refusing a code nobody taught it to render."""
     warnings = report.get('warnings', [])
-    if not warnings:
+    for warning in warnings:
+        if warning.get('code') not in NONBLOCKING_WARNINGS:
+            raise ValueError('Unknown nonblocking warning')
+    return (title_warning_lines(warnings) + library_warning_lines(warnings)
+            + headline_order_warning_lines(warnings))
+
+
+def title_warning_lines(warnings):
+    selected = [w for w in warnings if w.get('code') == 'title_difference_matched']
+    if not selected:
         return []
     lines = ['标题差异提醒（已核验为同一篇，不阻止后续处理）：']
-    for warning in warnings:
-        if warning.get('code') != 'title_difference_matched':
-            raise ValueError('Unknown nonblocking warning')
+    for warning in selected:
         lines.extend(['- 预约：' + warning['reservation_title'],
                       '  秀米：' + warning['xiumi_title'],
                       '  依据：' + warning['reason']])
     lines.append('请人工留意以上标题差异，无需等待人工确认再继续。')
     return lines
+
+
+def library_warning_lines(warnings):
+    """A tolerated library-count excess is reported, never silently dropped."""
+    selected = [w for w in warnings if w.get('code') == 'duplicate_unlinked_card']
+    if not selected:
+        return []
+    lines = ['秀米稿件库条数提醒（不阻止后续处理）：']
+    for warning in selected:
+        lines.extend(['- 页面自报条数比实际渲染的卡片少 ' + str(warning['count']) + ' 张',
+                      '  重复的是不可用槽位：' + '、'.join(warning['titles']),
+                      '  依据：不可用槽位不参与匹配，有链接真稿的 id 全部唯一'])
+    return lines
+
+
+def headline_order_warning_lines(warnings):
+    """Report which order was used when the sheet marks no headline.
+
+    The order has to be stated rather than assumed: the operator approved a
+    top-to-bottom fallback for unmarked days, and a notification that silently
+    omits it would leave the reader unable to tell a deliberate sheet order from
+    a missing headline decision.
+    """
+    selected = [w for w in warnings if w.get('code') == 'headline_absent_sheet_order']
+    if not selected:
+        return []
+    return ['头条提醒（不阻止后续处理）：',
+            '- 预约表未标注头条，本轮按预约表从上到下的顺序排列推送',
+            '- 依据：使用者 2026-10-12 裁定，未标头条按预约表行序处理，不再阻断']
 
 
 def alert_from_report(report, observation):
@@ -217,7 +273,7 @@ def alert_from_report(report, observation):
         else:
             lines.append('- ' + description)
     lines.append('本轮整组整理暂未开始，请确认以上问题。')
-    lines.extend(title_warning_lines(report))
+    lines.extend(nonblocking_warning_lines(report))
     return '\n'.join(lines)
 
 
@@ -235,7 +291,7 @@ def result_from_report(report, observation):
         return heading + '\n本轮已完整检查预约表：无预约，无需整理稿件。'
     if report.get('status') == 'ready_to_format' and articles and report.get('ready_to_format') is True:
         return '\n'.join([heading, '预约 ' + str(len(articles)) + ' 篇，已收齐并完成稿件匹配。',
-                          '基础整理待完成，尚未确认整理结果。'] + title_warning_lines(report))
+                          '基础整理待完成，尚未确认整理结果。'] + nonblocking_warning_lines(report))
     raise ValueError('Unknown or contradictory daily result')
 
 
@@ -247,8 +303,10 @@ def completion_from_report(report, observation, completion):
         raise ValueError('Completion must belong to this ready-to-format run')
     articles = {a['row']: a for a in observation['reservation']['articles']}
     order = report.get('ordered_rows', [])
+    # Headline first, then sheet order.  Zero headlines is a legal unmarked day and
+    # degenerates to plain row order; MORE than one is ambiguous and still refused.
     expected = [a['row'] for a in sorted(articles.values(), key=lambda a: (not a['is_headline'], a['row']))]
-    if order != expected or sum(a['is_headline'] for a in articles.values()) != 1:
+    if order != expected or sum(a['is_headline'] for a in articles.values()) > 1:
         raise ValueError('Incomplete or wrong article order')
     matches = {m['row']: m['candidates'] for m in observation['xiumi']['matches']}
     formats = completion.get('formatted_articles', [])
@@ -286,7 +344,9 @@ def completion_from_report(report, observation, completion):
                                       'reservation_title': articles[row]['title'],
                                       'xiumi_title': candidate['title'], 'draft_id': candidate['id'],
                                       'reason': reason})
-    if sorted(report.get('warnings', []), key=lambda w: w['row']) != sorted(expected_warnings, key=lambda w: w['row']):
+    # Only title differences are compared here; a library-count warning carries no row.
+    if (sorted(title_difference_warnings(report), key=lambda w: w['row'])
+            != sorted(expected_warnings, key=lambda w: w['row'])):
         raise ValueError('Report does not preserve actual title differences')
     if len(set(draft_ids)) != len(draft_ids):
         raise ValueError('Repeated formatted manuscript')
@@ -310,8 +370,8 @@ def completion_from_report(report, observation, completion):
         article = articles[row]
         lines.append(str(i) + '、' + article['title'] + ('（头条）' if article['is_headline'] else ''))
     lines.append(outcome)
-    lines.extend(title_warning_lines(report))
-    if not report.get('warnings'):
+    lines.extend(nonblocking_warning_lines(report))
+    if not title_difference_warnings(report):
         lines.append('秀米标题与预约标题均一致。')
     return '\n'.join(lines)
 

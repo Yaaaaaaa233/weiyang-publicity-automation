@@ -44,7 +44,7 @@ def check(snapshot, plan):
     if len({r['row'] for r in rows}) != len(rows):
         raise ValueError('Duplicate reservation rows.')
     if len({r['sync_title'] for r in rows}) != len(rows):
-        raise ValueError('Resolve duplicate titles with distinguishable test copies first.')
+        raise ValueError('Duplicate sync titles cannot be composed: an operator must resolve the collision, because a production copy keeps the source title and must never be given a marker to make it unique.')
     nodes, backgrounds = snapshot.get('nodes'), snapshot.get('backgrounds')
     if not isinstance(nodes, list) or not isinstance(backgrounds, list):
         raise ValueError('Snapshot needs nodes and backgrounds lists.')
@@ -57,9 +57,11 @@ def check(snapshot, plan):
            snapshot.get('text_truncated') is False and bool(snapshot.get('text')))
     record('xiumi_page', urlsplit(snapshot.get('url', '')).hostname == 'xiumi.us')
     headlines = [r for r in rows if r['is_headline']]
-    record('one_confirmed_headline', len(headlines) == 1)
-    source_order = sorted(rows, key=lambda r: r['row'])
-    expected = headlines + [r for r in source_order if not r['is_headline']]
+    # An unmarked day is legal and falls back to sheet order; more than one headline
+    # is an unresolved ordering conflict.
+    record('at_most_one_confirmed_headline', len(headlines) <= 1)
+    # Headline first, then sheet order -- with no headline this is plain row order.
+    expected = sorted(rows, key=lambda r: (not r['is_headline'], r['row']))
     roots = [n for n in nodes if has_class(n, 'x3-package')]
     record('one_composition_root', len(roots) == 1)
     plates = []

@@ -1,10 +1,22 @@
 {
   "node_id": "win-primary",
   "wps_url": "https://example.invalid/replace-with-observed-reservation-url",
-  "xiumi_library_url": "https://xiumi.us/#/user/papers",
+  "xiumi_library_url": "https://xiumi.us/#/studio/papers",
   "xiumi_account": "REPLACE_WITH_OBSERVED_ACCOUNT",
+  "max_library_pages": 100,
   "reviewed_instructions_sha256": "REPLACE_WITH_REVIEWED_INSTRUCTIONS_FINGERPRINT",
   "format_rules": "local/format-rules.json",
-  "composer_url": "https://xiumi.us/#/wxpack",
-  "target_account": "REPLACE_WITH_OBSERVED_AUTHORIZED_ACCOUNT"
+  "composer_url": "https://xiumi.us/studio/v5#/wxpack",
+  "target_account": "REPLACE_WITH_OBSERVED_AUTHORIZED_ACCOUNT",
+  "transfer_tag_ui": {
+    "panel_class": "tn-dialog-item-tag-edit",
+    "choice_class": "tag-item",
+    "current_list_class": "item-tags",
+    "choice_list_class": "all-tags",
+    "new_placeholder": "添加新标签，回车确认",
+    "save_text": "确定",
+    "evidence_paths": [
+      "local/windows-transfer-patch-20261008/ui-evidence/observed-tag-ui.json"
+    ]
+  }
 }

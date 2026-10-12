@@ -20,10 +20,25 @@ except ImportError:
     from read_wps_reservation import SHANGHAI
 
 
+# Windows: os.replace onto a path another process (indexer, antivirus) still holds open fails
+# transiently with PermissionError. This is the single exit every stage writes state through,
+# and the failure-notification path saves state *before* it delivers, so an unrecovered
+# transient stops a run with no alert at all. Retry a bounded number of times and then fail
+# exactly as before, so a genuine permission problem is never masked.
+REPLACE_ATTEMPTS=5
+REPLACE_BACKOFF_SECONDS=0.1
+
+
 def save_state(path, data):
     temporary=path.with_suffix('.tmp')
     temporary.write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding='utf-8')
-    temporary.replace(path)
+    for attempt in range(REPLACE_ATTEMPTS):
+        try:
+            temporary.replace(path);return
+        except PermissionError:
+            if attempt==REPLACE_ATTEMPTS-1:
+                temporary.unlink(missing_ok=True);raise
+            time.sleep(REPLACE_BACKOFF_SECONDS*(attempt+1))
 
 
 @contextmanager
@@ -127,7 +142,7 @@ def apply_decisions(observation, decisions):
     return observation
 
 
-def _execute(config, label, notification='preview', decisions_path=None, run_log=None):
+def _execute(config, label, notification='preview', decisions_path=None, run_log=None, notify_on_fatal=True):
     if not label.replace('-','').replace('_','').isalnum():
         raise ValueError('Invalid run label')
     day=datetime.now(SHANGHAI).date().isoformat()
@@ -162,7 +177,12 @@ def _execute(config, label, notification='preview', decisions_path=None, run_log
                     ledger.checkpoint(status,'notification_'+prior['notification']['status'],evidence,label)
                 finally:
                     prior['handoff']=ledger.finish(); save_state(state_path,prior)
-        return prior  # Repeated execution never repeats browser operations or a notification.
+            return prior  # A confirmed preview is not repeated.
+        # This entry only reads, checks and notifies, so a failed run left no downstream side
+        # effect and must stay retryable. Returning it would brick the identity permanently, and
+        # the caller would then trip over a state that has no observation to read.
+        if prior.get('phase')!='failed':
+            return prior  # Repeated execution never repeats browser operations or a notification.
     if decisions_path and (not prior or prior.get('phase')!='needs_attention'):
         raise ValueError('Decisions require this run to be awaiting matching review')
     token=uuid.uuid4().hex
@@ -192,7 +212,9 @@ def _execute(config, label, notification='preview', decisions_path=None, run_log
                         observed=wps_read.run(browser,config['wps_url'],day,config.get('reviewed_instructions_sha256'))
                         observation.update(observed); observation['wps_run_id']=observed['run_id']; observation['run_id']=label
                         state['phase']='wps_read'
-                        write(folder/'wps-observation.json',observation)
+                        # Unique name: evidence files are never overwritten, and a retry of a
+                        # failed run must not collide with the artefact the first attempt left.
+                        write(folder/('wps-observation-'+uuid.uuid4().hex+'.json'),observation)
                         save_state(state_path,state)
                         if observation['reservation']['status']=='ok' and observation['reservation']['articles']:
                             stage='xiumi'
@@ -232,7 +254,9 @@ def _execute(config, label, notification='preview', decisions_path=None, run_log
             save_state(state_path,state)
             ledger.checkpoint('failed','check_interrupted',browser.evidence,label)
             # Unexpected failures have unknown booking counts: report only the failed stage.
-            if notification=='send':
+            # A fatal stop ends this run, so a preview also alerts unless an outer entry
+            # (full_run) already owns the notification for this run.
+            if notification=='send' or notify_on_fatal:
                 message='未央宣传运营提醒｜'+day+'\n运行：'+label+'\n检查中断（'+state['error_code']+'），预约数量及整理结果尚未确认，请查看本机检查点。'
                 state['notification']=notify_wecom.deliver_result(message,notify_wecom.configured_webhook(),execute=True)
             raise
@@ -242,7 +266,7 @@ def _execute(config, label, notification='preview', decisions_path=None, run_log
     return state
 
 
-def execute(config, label, notification='preview', decisions_path=None, log=None):
+def execute(config, label, notification='preview', decisions_path=None, log=None, notify_on_fatal=True):
     try:
         from .run_log import RunLog
     except ImportError:
@@ -250,7 +274,7 @@ def execute(config, label, notification='preview', decisions_path=None, log=None
     log = log or RunLog(label, datetime.now(SHANGHAI).date().isoformat(), root=ROOT)
     try:
         with log.stage('read_check_notify'):
-            state = _execute(config, label, notification, decisions_path, log)
+            state = _execute(config, label, notification, decisions_path, log, notify_on_fatal=notify_on_fatal)
         observation = read(private_path(state['observation'])) if state.get('observation') else {}
         count = len(observation.get('reservation',{}).get('articles',[])) if observation.get('reservation',{}).get('complete') else None
         log.result(state['phase'], reservation_count=count,

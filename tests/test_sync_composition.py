@@ -58,13 +58,40 @@ class PreflightTests(unittest.TestCase):
         option.pop('checked')
         self.assertFalse(check(snapshot, plan)['composition_checks_passed'])
 
-    def test_truncated_capture_and_missing_headline_are_rejected(self):
+    def test_truncated_capture_is_rejected(self):
         snapshot, plan = inputs()
         snapshot['nodes_truncated'] = True
         self.assertFalse(check(snapshot, plan)['composition_checks_passed'])
-        snapshot['nodes_truncated'] = False
-        plan['articles'][1]['is_headline'] = False
-        self.assertFalse(check(snapshot, plan)['composition_checks_passed'])
+
+    def test_unmarked_day_is_accepted_in_sheet_order(self):
+        """No marked headline is legal: the composition must read top-to-bottom.
+
+        `inputs()` always promotes a headline, so the snapshot is rebuilt here with
+        the plates in plain row order -- exactly what the approved fallback produces.
+        """
+        snapshot, plan = inputs()
+        for article in plan['articles']:
+            article['is_headline'] = False
+        plates = [n for n in snapshot['nodes'] if n.get('class') == 'x3-slice-plate']
+        rows = [r['row'] for r in sorted(plan['articles'], key=lambda a: a['row'])]
+        for plate, row in zip(plates, rows):
+            title = next(n for n in snapshot['nodes']
+                         if n.get('class') == 'inner' and n['selector'].startswith(plate['selector'] + ' > '))
+            title['value'] = '测试稿' + str(row)
+        result = check(snapshot, plan)
+        self.assertTrue(result['composition_checks_passed'])
+        self.assertEqual(result['expected_rows'], [1, 2, 3])
+        self.assertTrue(next(c for c in result['checks']
+                             if c['name'] == 'at_most_one_confirmed_headline')['passed'])
+
+    def test_multiple_headlines_are_rejected(self):
+        snapshot, plan = inputs()
+        for article in plan['articles']:
+            article['is_headline'] = True
+        result = check(snapshot, plan)
+        self.assertFalse(result['composition_checks_passed'])
+        self.assertFalse(next(c for c in result['checks']
+                              if c['name'] == 'at_most_one_confirmed_headline')['passed'])
 
     def test_prior_attempt_does_not_allow_replay(self):
         snapshot, plan = inputs()

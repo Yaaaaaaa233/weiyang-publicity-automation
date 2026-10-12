@@ -11,6 +11,13 @@ import re
 
 SHANGHAI = timezone(timedelta(hours=8))
 ROOT = Path(__file__).resolve().parents[1]
+# `generated_at` is stamped by the WPS cloud script's own clock (`new Date()` in the AirScript),
+# while `now` is this host's clock. The two differ by seconds in practice, and the script's own
+# runtime is the same magnitude, so the raw difference straddles zero and the freshness gate
+# would fail at random. wps_read already tolerates exactly this skew when it checks the cloud
+# run_id (`started-5 .. time.time()+5`); mirror that allowance on the negative side here.
+# Staleness protection is unchanged: the positive bound stays at 60 minutes.
+CLOCK_SKEW_ALLOWANCE = timedelta(seconds=120)
 
 
 def utf16_length(text):
@@ -65,7 +72,7 @@ def reservation_from_payload(payload, expected_date, evidence_paths, now=None, i
     if payload.get('schema') != 'weiyang.reservation-day.v1' or payload.get('date') != expected_date:
         raise ValueError('wrong schema or business date')
     observed = datetime.fromisoformat(payload['generated_at'])
-    if observed.tzinfo is None or not timedelta(0) <= now - observed <= timedelta(minutes=60):
+    if observed.tzinfo is None or not -CLOCK_SKEW_ALLOWANCE <= now - observed <= timedelta(minutes=60):
         raise ValueError('stale or future output')
     base = {'date': expected_date, 'status': 'failed', 'complete': False,
             'conflicts_resolved': False, 'evidence_paths': evidence_paths,
@@ -120,16 +127,27 @@ def reservation_from_payload(payload, expected_date, evidence_paths, now=None, i
         base['articles'].append({'row': entry['row'], 'unit': cells[1], 'title': cells[2],
                                  'is_headline': marker == '是', 'remarks': cells[9],
                                  'review_and_publish': cells[4:9]})
-    if base['articles'] and sum(a['is_headline'] for a in base['articles']) != 1:
-        base['issues'].append('headline_unresolved')
+    # Operator decision 2026-10-12: a day that marks NO headline is not a conflict.
+    # `conflicts_resolved` is `not issues`, so leaving a zero-headline day neutral is what
+    # lets ordered_rows be produced at all -- otherwise the day has no order, daily_check
+    # reports the derivative `reservation_remarks_or_order_unresolved` for a sheet whose
+    # remarks column is empty, and the round stops on a question the operator has already
+    # answered.  The checker still records a non-blocking warning naming the order used.
+    # TWO OR MORE marked headlines stay a stop: that is a genuine ordering ambiguity no
+    # fallback can resolve, and guessing which one is first would publish the wrong lead.
+    if base['articles'] and sum(a['is_headline'] for a in base['articles']) > 1:
+        base['issues'].append('headline_conflict_multiple')
     base.update(status='ok', complete=True, sheet=block['sheet'],
                 merge_range=[first, last], instructions=block['instructions'])
     if any(isinstance(issue, dict) and issue['code'] == 'partial_reservation' for issue in base['issues']):
         base.update(status='failed', complete=False)
     base['conflicts_resolved'] = not base['issues']
-    base['ordered_rows'] = ([a['row'] for a in base['articles'] if a['is_headline']]
-                            + [a['row'] for a in base['articles'] if not a['is_headline']]
-                            if base['conflicts_resolved'] else [])
+    # Headline first, then the rest in sheet order.  With no marked headline this
+    # degenerates to plain top-to-bottom row order, which is exactly the agreed
+    # behaviour for an unmarked day -- so it is written explicitly by row rather
+    # than relying on the input rows already arriving sorted.
+    ordered = sorted(base['articles'], key=lambda a: (not a['is_headline'], a['row']))
+    base['ordered_rows'] = [a['row'] for a in ordered] if base['conflicts_resolved'] else []
     return base
 
 

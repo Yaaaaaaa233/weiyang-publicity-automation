@@ -74,6 +74,14 @@ class WorkflowTests(unittest.TestCase):
         plan = plan_input(); plan['articles'][0]['is_headline'] = True
         with self.assertRaises(w.Stop): w.validate_plan(plan)
 
+    def test_unmarked_day_plan_is_allowed_and_keeps_sheet_order(self):
+        """Operator decision 2026-10-12: zero headlines is legal, not a stop."""
+        plan = plan_input()
+        for article in plan['articles']:
+            article['is_headline'] = False
+        w.validate_plan(plan)
+        self.assertEqual([a['row'] for a in w.ordered(plan)], [1, 2, 3])
+
     def test_foreign_composer_and_duplicate_source_versions_are_rejected(self):
         plan = plan_input(); plan['composer_url'] = 'https://example.com/other'
         with self.assertRaises(w.Stop): w.validate_plan(plan)

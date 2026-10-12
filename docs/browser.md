@@ -122,6 +122,28 @@ python3 scripts/browserctl.py self-test --resume
 - 换电脑需要先停止旧节点，再备份命名卷和稿件文件，在新节点恢复；只克隆代码不会复制登录状态。不要执行 `docker compose down -v`，它会删除命名卷。
 - 登录状态跨设备/系统迁移仍需实际验证，平台也可能要求重新登录。现有任务账本支持检查点与交接记录，见 `docs/tasks.md`；浏览器恢复与自动业务任务恢复仍是不同能力。
 
+## 运行窗口：关掉 Docker 要不要重新登录
+
+**不需要重新登录。** 登录态就是 Chromium 的 profile，存在命名卷 `weiyang-publicity_browser-data`（挂到 `/home/seluser/profile`）里。**停止容器、退出 Docker Desktop 都不会动命名卷**；只有 `docker compose down -v` 会删，所以那条命令在本项目里禁止使用。已有的验证：本机 `docker compose restart browser` 后仍能进入已保存的编辑器（见 `docs/article-validation.md`），Windows 在 `a44ab23` 基线通过"容器重启存储保留"。
+
+要分清的两件事：
+
+- **平台侧会话过期与 Docker 无关。** 几天不登录，WPS / 秀米可能要求重新扫码——这是人工项，自动化只能检测并通知（登录异常单独报告，不能当成"无预约"或"缺稿"）。
+- **`SE_NODE_SESSION_TIMEOUT=86400`。** 容器停再起，旧的 Selenium 会话已经没了，第一个浏览器动作会重新 `start` 一个会话；profile 与登录态不受影响。
+
+日常不需要让 Docker 全天占内存。用运行窗口把它开、关掉：
+
+```sh
+python3 scripts/runtime_window.py status   # 引擎、容器、两个命名卷都在不在
+python3 scripts/runtime_window.py up       # 引擎没开就拉起 Docker Desktop，再 up -d --wait
+python3 scripts/runtime_window.py down     # docker compose stop browser，保留容器与命名卷
+```
+
+- 业务轮次前后各跑一次；`Browser.reserved()` 自己会在任何浏览器动作前先确认运行窗口可用（不可用报 `browser_runtime_unavailable`，并写 `local/browser-image-drift/runtime-*.json`）。
+- `down` **只停容器**。`docker compose stop` 保住了容器和命名卷，但 Docker Desktop 的虚拟机仍占着内存——要把内存真正还回去，只能退出 Docker Desktop。本模块不提供未经验证的强杀方式：需要时在私有 `local/runtime-window.json` 配置一条**已在本机验证过**的 `docker_desktop_stop_command`，否则手动退出。
+- 逃生阀：`WEIYANG_BROWSER_KEEP_RUNNING=1` 让 `down` 不停容器（当天还要手动用的日子）；`WEIYANG_BROWSER_RUNTIME=0` 跳过运行窗口预检。
+- 注意 `up` 会启动 Docker Desktop（Mac `open -a Docker`，Windows `Start-Process`）；这是预期行为，不是故障。
+
 当前使用固定镜像 `selenium/standalone-chromium:4.48.0-20260905`。来源与人工查看说明：[Selenium 官方仓库](https://github.com/SeleniumHQ/docker-selenium)。Windows x86_64 已在 `a44ab23` 基线通过构建、输入、点击、截图及容器重启存储保留，见 [Windows 迁移验证](windows-migration-validation.md)；真实业务及跨设备登录恢复另行验证。
 
 2026-10-03 真实副本验证补充：`inspect` 记录节点内联样式和完整段落渲染文本（段落上限 10000 字并标记截断）。判断空段落使用段落全文，不能只检查 `own_text`；编辑器快速输入占位与文章预览分开核对。`SelectAll` 已在本机副本标题输入验收；指定滚动原点已用于文章区和预览 iframe。新增字段和操作尚未在 Windows 验收。

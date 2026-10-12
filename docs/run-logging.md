@@ -60,3 +60,22 @@ Windows 实际结构验证显示：`assistant/message.data.usage` 为逐次调�
 输出的 `request_id` 是实际持久会话 ID 与消息 ID 的哈希组合，用于本地去重；不是供应商 HTTP 请求 ID，元数据明确 `provider_request_id_available=false`。重复事件依据 seq 和完整事件一致性核对，冲突拒绝，不能按相同 Token 值合并不同调用。旁路元数据必须随统计保留；`partial` 不得只导入普通调用后宣称整个执行已完整测量。
 
 调度应在 agent 开始前建立 RunLog；若业务 full_run 的日志起点晚于模型调用，则单独记录 agent 执行测量窗口，不能修改调用时间使其通过导入。导出适配在 Mac/Windows 136 项测试通过；Windows 一个真实已结束轮次的 61 次调用与原始日志直接统计一致，四类 Token 求和相同。真实跨压缩窗口正确标记 partial；原始样本没有重复事件，重复去重仅由离线测试覆盖。这是部署探索轮次，不是日常业务成本样本。价格及费用保持未知，直到提供真实模型对应的可靠价格依据。
+
+## 一步归集（2026-10-09）
+
+上面"导出 → 导入"两步手工操作已封装成一条命令，三天试运行的每轮收尾用它：
+
+```sh
+python3 scripts/collect_round_usage.py --run RUN_ID --date YYYY-MM-DD \
+  --session <私有session.v4.jsonl[.zstd]> --start 带时区时间 --end 带时区时间 --turn N [--turn M]
+```
+
+它按同一组参数依次调用 `dsh_usage_export.py` 与 `run_log.py usage`，导出件落在 `local/round-usage/<run>-<uuid>.json`（重新运行不会覆盖旧件），并打印本轮四类 Token 与 `status`（`measured`/`partial`/`unknown`）。
+
+约定：
+
+- **窗口取自真实事件时间戳。** DSH 事件时间是整数毫秒，窗口端点也要对齐到毫秒：`--start` 若比 `step/start.time` 早出不足 1 毫秒的零头，导出会以 `Call crosses execution boundary` 拒绝。从实际事件时间反推窗口，不要手写一个"差不多"的整点。
+- **RunLog 必须先存在。** 先建本轮 `RunLog` 再导用量；导入时会校验用量起点不早于本轮开始，晚了就会被判为"用量早于本次执行"。
+- **导出失败就不导入。** 命令在导出非零退出时直接失败，不会拿半个窗口去污染摘要。
+- **会话原始文件是私有证据**：不打包、不外发；仓库内只允许放在 `local/` 下。
+- 摘要里的 `usage` 仍是 `unknown/requests 0`，说明这一步没做；**不是零消耗**。

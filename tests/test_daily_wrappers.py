@@ -3,6 +3,7 @@ from contextlib import closing, contextmanager
 from datetime import datetime
 import json
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -270,6 +271,94 @@ class DailyEntryTests(unittest.TestCase):
             self.assertEqual(reader.call_count,1)
             self.assertEqual(sender.call_count,1)
             self.assertEqual(state['notification']['status'],'accepted')
+
+    def test_failed_run_stays_retryable_instead_of_returning_the_failed_state(self):
+        """A run that died before its observation must be re-read, not returned as-is."""
+        with patch.object(wps_read,'run',return_value=self.observation), patch.object(xiumi_scan,'run',return_value=self.receipt):
+            daily_run.execute(self.config,'failed-a')
+        path=self.root/'local/daily-runner/runs/failed-a/state.json'
+        prior=json.loads(path.read_text(encoding='utf-8'))
+        self.assertEqual(prior['phase'],'ready_to_format')
+        # Simulate the observed defect: died during the read, so state has phase=failed and no observation.
+        prior.update(phase='failed',error_code='ValueError'); prior.pop('observation',None)
+        path.write_text(json.dumps(prior),encoding='utf-8')
+        with patch.object(wps_read,'run',return_value=self.observation) as reader, patch.object(xiumi_scan,'run',return_value=self.receipt):
+            state=daily_run.execute(self.config,'failed-a')
+        self.assertEqual(reader.call_count,1)
+        self.assertNotEqual(state['phase'],'failed')
+
+    def test_fatal_stop_in_preview_notifies_unless_an_outer_entry_owns_it(self):
+        """A blocked preview must not be silent; full_run suppresses the inner alert."""
+        def run(label,**kwargs):
+            with patch.object(wps_read,'run',return_value=self.observation), \
+                 patch.object(xiumi_scan,'run',return_value=self.receipt), \
+                 patch('scripts.notify_wecom.configured_webhook',return_value='private'), \
+                 patch('scripts.notify_wecom.deliver_result',return_value={'status':'accepted'}) as sender, \
+                 patch.object(daily_run.daily_check,'evaluate',side_effect=RuntimeError('boom')):
+                with self.assertRaises(RuntimeError):
+                    daily_run.execute(self.config,label,**kwargs)
+                return sender
+        self.assertEqual(run('fatal-inner').call_count,1)
+        self.assertEqual(run('fatal-outer',notify_on_fatal=False).call_count,0)
+
+
+class SaveStateRetryTests(unittest.TestCase):
+    """Windows can deny the atomic replace onto a path another process still holds open.
+
+    Every stage writes state through daily_run.save_state, and the failure-notification path
+    saves state *before* it delivers, so an unrecovered transient stops a run without any
+    alert. Repro evidence from the Windows executor (2026-10-10): two independent tests, two
+    call sites (full_run.save and draft_workflow.persist), one shared exit.
+    """
+
+    def setUp(self):
+        self.root=Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree,self.root,ignore_errors=True)
+        self.path=self.root/'state.json'
+
+    def _denying_replace(self,failures):
+        original=Path.replace;calls={'n':0}
+        def replace(source,target):
+            calls['n']+=1
+            if calls['n']<=failures:raise PermissionError(5,'Access is denied')
+            return original(source,target)
+        return replace,calls
+
+    def test_transient_denial_is_retried_and_the_state_still_lands(self):
+        replace,calls=self._denying_replace(2)
+        with patch.object(Path,'replace',replace),patch.object(daily_run.time,'sleep'):
+            daily_run.save_state(self.path,{'phase':'ready_to_format','run_id':'x'})
+        self.assertEqual(calls['n'],3)
+        self.assertEqual(json.loads(self.path.read_text(encoding='utf-8')),
+                         {'phase':'ready_to_format','run_id':'x'})
+        self.assertFalse(self.path.with_suffix('.tmp').exists())
+
+    def test_permanent_denial_still_raises_and_leaves_no_temporary_behind(self):
+        replace,calls=self._denying_replace(10**6);slept=[]
+        with patch.object(Path,'replace',replace),patch.object(daily_run.time,'sleep',slept.append):
+            with self.assertRaises(PermissionError):
+                daily_run.save_state(self.path,{'phase':'x'})
+        self.assertEqual(calls['n'],daily_run.REPLACE_ATTEMPTS)
+        self.assertEqual(len(slept),daily_run.REPLACE_ATTEMPTS-1)
+        self.assertLessEqual(sum(slept),5.0)
+        self.assertFalse(self.path.with_suffix('.tmp').exists())
+        self.assertFalse(self.path.exists())
+
+    def test_other_os_errors_are_not_retried(self):
+        calls={'n':0}
+        def replace(source,target):
+            calls['n']+=1;raise OSError(28,'No space left on device')
+        with patch.object(Path,'replace',replace),patch.object(daily_run.time,'sleep') as sleep:
+            with self.assertRaises(OSError):
+                daily_run.save_state(self.path,{'phase':'x'})
+        self.assertEqual(calls['n'],1)
+        sleep.assert_not_called()
+
+    def test_the_retry_stays_bounded(self):
+        self.assertGreaterEqual(daily_run.REPLACE_ATTEMPTS,2)
+        self.assertLessEqual(daily_run.REPLACE_ATTEMPTS,10)
+        total=sum(daily_run.REPLACE_BACKOFF_SECONDS*(i+1) for i in range(daily_run.REPLACE_ATTEMPTS-1))
+        self.assertLessEqual(total,5.0)
 
 
 if __name__=='__main__':
