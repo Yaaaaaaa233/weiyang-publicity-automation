@@ -61,6 +61,8 @@ def editor_url(identifier):
     return 'https://xiumi.us/studio/v5#/paper/for/'+identifier+'/cube/0'
 
 def content(snapshot):
+    if snapshot.get('ui_only') or snapshot.get('excluded_selector'):
+        raise Stop('body_scope_incomplete','Controls-only evidence cannot verify an article')
     if snapshot.get('nodes_truncated') is not False or snapshot.get('text_truncated') is not False:
         raise Stop('body_truncated','Collect complete body evidence')
     identifier=paper_id(snapshot['url'])
@@ -203,6 +205,12 @@ def snapshot_body(browser, identifier):
         previous=current;time.sleep(.4)
     raise Stop('body_unstable','Body did not settle')
 
+def editor_controls(browser, identifier):
+    snapshot=browser.editor_ui()
+    if paper_id(snapshot['url']) != identifier:
+        raise Stop('draft_identity_changed','Editor controls belong to another draft')
+    return snapshot
+
 def observe(browser, candidate):
     if paper_id(candidate['url']) != candidate['id']:
         raise Stop('draft_identity_changed','Candidate location differs from observed ID')
@@ -328,16 +336,17 @@ class Drafts:
             snapshot,value=snapshot_body(self.browser,source)
             if body_signature(value)!=body_signature(baseline) or value['title']!=candidate['title']:
                 raise Stop('source_changed','Source changed since baseline')
+            snapshot=editor_controls(self.browser,record['copy_id'] or source)
             more=one(snapshot['nodes'],lambda n:n.get('own_text')=='更多' and n.get('tag')=='span')
             self.browser.click(more)
-            snapshot=self.browser.snapshot()
+            snapshot=editor_controls(self.browser,record['copy_id'] or source)
             saveas=one(snapshot['nodes'],lambda n:n.get('tag')=='a' and n.get('own_text')=='另存一个图文','save_as_unavailable')
             record.update(copy_reserved=True,phase='copy_intent');self.persist()
             self.browser.click(saveas)
             def created(s):
                 try:return paper_id(s['url'])!=source
                 except Stop:return False
-            snapshot=self.browser.wait(created)
+            snapshot=self.browser.wait(created,read=lambda:self.browser.command('observe'))
             identifier=paper_id(snapshot['url'])
             # Record ID immediately, before any rename/save operation.
             record.update(copy_id=identifier,phase='copy_created');self.persist()
@@ -356,7 +365,7 @@ class Drafts:
         if changed or record['phase']=='repairing':
             if record['phase']=='save_intent':
                 raise Stop('save_outcome_unknown','Observe persisted copy before replaying a save')
-            snapshot=self.browser.snapshot()
+            snapshot=editor_controls(self.browser,record['copy_id'] or source)
             save=one(snapshot['nodes'],lambda n:n.get('own_text')=='保存' and n.get('tag')=='span')
             record['phase']='save_intent';self.persist()
             self.browser.click(save)
@@ -398,7 +407,9 @@ class Drafts:
         snapshot,value=snapshot_body(self.browser,record['copy_id'])
         if fingerprint(value)!=action.get('before_sha256'):
             raise Stop('repair_stale','Repair refers to another observation; read again')
-        node=one(snapshot['nodes'],lambda n:n.get('selector')==action.get('selector'),'repair_target_ambiguous')
+        controls=editor_controls(self.browser,record['copy_id'])
+        targets={n['selector']:n for n in snapshot['nodes']+controls['nodes']}
+        node=one(list(targets.values()),lambda n:n.get('selector')==action.get('selector'),'repair_target_ambiguous')
         kind=action.get('kind')
         def reserve():
             record['repair_intent']={'kind':kind,'before_sha256':action['before_sha256']};self.persist()
@@ -426,7 +437,7 @@ class Drafts:
             if len(tail_tops)!=1 or abs(tops.index(node)-tops.index(tail_tops[0]))!=1:
                 raise Stop('repair_action_unsupported','Only immediate top-level neighbors of the tail are eligible')
             reserve();self.browser.click(node)
-            toolbar=self.browser.snapshot()
+            toolbar=editor_controls(self.browser,record['copy_id'])
             delete=one(toolbar['nodes'],lambda n:n.get('own_text')=='删除' and n.get('tag') in ('a','span','button'),'delete_control_ambiguous')
             self.browser.click(delete)
         elif kind=='replace_credit':
@@ -439,7 +450,7 @@ class Drafts:
             reserve();self.browser.command('focus',node.get('stable_selector') or node['selector'])
             self.browser.command('key','SelectAll');self.browser.command('type',replacement);self.browser.command('key','Tab')
         elif kind=='zero_spacing':
-            parents=[n for n in snapshot['nodes'] if node['selector'].startswith(n['selector']+' > ')]
+            parents=[n for n in targets.values() if node['selector'].startswith(n['selector']+' > ')]
             if node.get('tag')!='input' or not any(n.get('rendered_text','').strip() in ('组前距','组后距') for n in parents):
                 raise Stop('repair_action_unsupported','Only verified group spacing controls may be set to zero')
             reserve();self.browser.command('focus',node.get('stable_selector') or node['selector'])
@@ -451,7 +462,8 @@ class Drafts:
             raise Stop('repair_preservation_failed','Repair changed protected body content; retain intent and baseline')
         mutated=kind in ('replace_credit','zero_spacing','delete_empty_component') or (kind=='click' and node.get('rendered_text','').strip() in ('头图.gif','尾图.gif','前插空行','后插空行'))
         if mutated:
-            save=one(snapshot['nodes'],lambda n:n.get('own_text')=='保存' and n.get('tag')=='span')
+            controls=editor_controls(self.browser,record['copy_id'])
+            save=one(controls['nodes'],lambda n:n.get('own_text')=='保存' and n.get('tag')=='span')
             self.browser.click(save);self.browser.command('reload')
             _,persisted=snapshot_body(self.browser,record['copy_id'])
             if not preservation(value,persisted) or value['title']!=persisted['title']:

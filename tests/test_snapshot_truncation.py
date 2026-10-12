@@ -415,12 +415,12 @@ class BridgeCapContractTests(unittest.TestCase):
         encoding='utf-8')
 
     def test_per_node_text_cap_is_the_raised_value(self):
-        self.assertIn("rendered_text:(e.innerText || '').slice(0, 100000)", self.SCRIPT)
-        self.assertIn("rendered_text_truncated:(e.innerText || '').length > 100000", self.SCRIPT)
+        self.assertIn("rendered_text:renderedText(e).slice(0, 100000)", self.SCRIPT)
+        self.assertIn("rendered_text_truncated:renderedText(e).length > 100000", self.SCRIPT)
 
     def test_page_node_and_text_caps_are_unchanged(self):
         self.assertIn('nodes_truncated:elements.length > 3000', self.SCRIPT)
-        self.assertIn("text:(root.innerText || '').slice(0, 100000)", self.SCRIPT)
+        self.assertIn("text:collectedText.slice(0, 100000)", self.SCRIPT)
 
     def test_paragraph_cap_stays_below_the_page_cap(self):
         # A per-paragraph cap must exist and be smaller than the whole-page text cap, otherwise a

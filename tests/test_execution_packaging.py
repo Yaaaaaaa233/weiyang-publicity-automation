@@ -322,11 +322,12 @@ class CopyLifecycleTests(unittest.TestCase):
                 if args[0] in ('open','new-window'):
                     self.current=d.paper_id(args[1])
                     return {'handle':'new','previous_handle':'old'}
+                if args[0]=='observe':return {'url':d.editor_url(self.current)}
                 if args[0]=='type':self.title=args[1]
                 if args[0]=='reload':self.title=self.saved_title
                 return {}
-            def snapshot(self):
-                return {'nodes':[{'tag':'span','own_text':'更多','selector':'more'},
+            def editor_ui(self):
+                return {'url':d.editor_url(self.current),'nodes':[{'tag':'span','own_text':'更多','selector':'more'},
                                  {'tag':'a','own_text':'另存一个图文','selector':'saveas'},
                                  {'tag':'span','own_text':'保存','selector':'save'}]}
             def click(self,node):
@@ -338,12 +339,13 @@ class CopyLifecycleTests(unittest.TestCase):
                     # inheriting the source title verbatim.
                     if copy_suffix:self.title=sample()['title']+copy_suffix
                 if node['selector']=='save':self.saved_title=self.title
-            def wait(self,predicate):return {'url':d.editor_url(self.current)}
+            def wait(self,predicate,read=None):return read()
+            def snapshot(self):raise AssertionError('Whole-page read forbidden')
         b=B();self.browser=b
         def snapshot_body(browser,identifier):
             value=sample(identifier);value['title']=browser.title
             if corrupt and identifier=='2':value['images'][1]['width']=999
-            return b.snapshot()|{'url':d.editor_url(identifier)},value
+            return b.editor_ui()|{'url':d.editor_url(identifier)},value
         patches=[patch.object(d,'ROOT',root),patch.object(check_runtime,'ROOT',root),
                  patch.object(d,'observe',return_value=(sample(),'local/proof.json')),patch.object(d,'snapshot_body',snapshot_body)]
         for p in patches:p.start();self.addCleanup(p.stop)
@@ -359,6 +361,21 @@ class CopyLifecycleTests(unittest.TestCase):
         self.assertTrue(result['saved_reopened']);self.assertIn('close-window',events)
         drafts.prepare(article,candidate)
         self.assertEqual(events.count('click_saveas'),1);self.assertEqual(events.count('click_save'),1)
+    def test_created_id_survives_body_read_failure_without_replaying_save_as(self):
+        drafts,events=self.fixture()
+        original=d.snapshot_body
+        def fail_after_creation(b,identifier):
+            if identifier=='2':raise Stop('body_images_loading','read incomplete')
+            return original(b,identifier)
+        with patch.object(d,'snapshot_body',side_effect=fail_after_creation):
+            for _ in range(2):
+                with self.assertRaises(Stop):
+                    drafts.prepare({'row':1,'is_headline':True},{'id':'1','title':sample()['title']})
+        self.assertEqual(events.count('click_saveas'),1)
+        saved=json.loads(drafts.index_path.read_text())['copies']['1']
+        self.assertEqual(saved['copy_id'],'2')
+        self.assertEqual(saved['phase'],'copy_created')
+
     def test_unknown_save_as_is_durable_and_no_second_click(self):
         drafts,events=self.fixture(uncertain=True);article={'row':1,'is_headline':True};candidate={'id':'1','title':sample()['title']}
         for _ in range(2):

@@ -31,6 +31,14 @@ const selector = arguments[0];
 const matches = document.querySelectorAll(selector);
 if (matches.length !== 1) throw new Error('Inspection selector must match exactly one element.');
 const root = matches[0];
+const uiOnly = arguments[1] === true;
+const excluded = uiOnly ? [...document.querySelectorAll('.tn-page-vessel')] : [];
+if (uiOnly && excluded.length !== 1) throw new Error('Editor UI requires exactly one body vessel.');
+const omitted = e => excluded.some(v => v === e || v.contains(e));
+const containsOmitted = e => excluded.some(v => e.contains(v));
+const ownText = e => [...e.childNodes].filter(n => n.nodeType === Node.TEXT_NODE)
+  .map(n => n.textContent).join(' ').trim();
+const renderedText = e => uiOnly && containsOmitted(e) ? ownText(e) : (e.innerText || '');
 const visible = e => {
   const s = getComputedStyle(e), r = e.getBoundingClientRect();
   return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
@@ -85,7 +93,7 @@ const stablePath = e => {
   }
   return path(e);
 };
-const elements = [root, ...root.querySelectorAll('*')].filter(visible);
+const elements = [root, ...root.querySelectorAll('*')].filter(e => visible(e) && !omitted(e));
 const nodes = elements.slice(0, 3000).map(e => ({
   tag:e.tagName.toLowerCase(), id:e.id, class:e.getAttribute('class') || '',
   parent_class:e.parentElement ? e.parentElement.getAttribute('class') || '' : '',
@@ -101,8 +109,8 @@ const nodes = elements.slice(0, 3000).map(e => ({
   // content() would have raised body_truncated even after the element-count wall was fixed by
   // scoping the read. 100000 matches the whole-page `text` cap below, so the bound stays meaningful
   // and the truncated flag still fails closed.
-  rendered_text:(e.innerText || '').slice(0, 100000),
-  rendered_text_truncated:(e.innerText || '').length > 100000,
+  rendered_text:renderedText(e).slice(0, 100000),
+  rendered_text_truncated:renderedText(e).length > 100000,
   value:['INPUT','TEXTAREA'].includes(e.tagName) && e.type !== 'password' ? e.value : null,
   checked:e.tagName === 'INPUT' && ['checkbox','radio'].includes(e.type) ? e.checked : null,
   disabled:'disabled' in e ? Boolean(e.disabled) : null,
@@ -131,8 +139,10 @@ const images = elements.filter(e => e.tagName === 'IMG').map(e => ({
 const backgrounds = elements.map(e => ({tag:e.tagName.toLowerCase(), id:e.id,
   class:e.getAttribute('class') || '', image:getComputedStyle(e).backgroundImage,
   selector:path(e), rect:rect(e)})).filter(e => e.image !== 'none');
-return {selector, url:location.href, title:document.title,
-  text:(root.innerText || '').slice(0, 100000), text_truncated:(root.innerText || '').length > 100000,
+const collectedText = uiOnly ? elements.map(ownText).join('\n') : (root.innerText || '');
+return {selector, ui_only:uiOnly, excluded_selector:uiOnly ? '.tn-page-vessel' : null,
+  url:location.href, title:document.title,
+  text:collectedText.slice(0, 100000), text_truncated:collectedText.length > 100000,
   nodes, nodes_truncated:elements.length > 3000, images, backgrounds};
 """
 
@@ -287,7 +297,7 @@ def navigate(sid, url):
     call('POST', session_path(sid, '/url'), {'url': url})
 
 
-def inspect(sid, selector, name, frame=None):
+def inspect(sid, selector, name, frame=None, ui_only=False):
     if Path(name).name != name or not name.endswith('.json'):
         raise BrowserError('invalid filename', 'Use a plain filename ending in .json.')
     # Each call begins and ends in the top-level document, including on failure.
@@ -300,7 +310,7 @@ def inspect(sid, selector, name, frame=None):
                 raise BrowserError('ambiguous frame', 'Frame selector must match exactly one element.')
             call('POST', session_path(sid, '/frame'), {'id': frames[0]})
         snapshot = call('POST', session_path(sid, '/execute/sync'),
-                        {'script': INSPECT_SCRIPT, 'args': [selector]})
+                        {'script': INSPECT_SCRIPT, 'args': [selector, True] if ui_only else [selector]})
         snapshot['frame_selector'] = frame
         target = Path('/opt/artifacts') / name
         target.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding='utf-8')
@@ -448,6 +458,7 @@ def main():
     p = sub.add_parser('text'); p.add_argument('selector', nargs='?', default='body')
     p = sub.add_parser('inspect'); p.add_argument('selector'); p.add_argument('filename')
     p.add_argument('--frame', help='CSS selector of one iframe in the top-level document')
+    p = sub.add_parser('inspect-editor-ui'); p.add_argument('filename')
     p = sub.add_parser('self-test'); p.add_argument('--resume', action='store_true')
     args = parser.parse_args()
     if fcntl is None:
@@ -554,6 +565,8 @@ def main():
             return {'text': call('GET', element_path(sid, args.selector, '/text'))}
         elif args.command == 'inspect':
             return inspect(sid, args.selector, args.filename, args.frame)
+        elif args.command == 'inspect-editor-ui':
+            return inspect(sid, 'body', args.filename, ui_only=True)
         elif args.command == 'self-test':
             return self_test(sid, args.resume)
         return observe(sid)

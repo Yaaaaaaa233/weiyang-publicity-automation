@@ -154,7 +154,7 @@ class Browser:
     def command(self, *args):
         started=time.monotonic()
         log=getattr(self,'log',None)
-        if log and args[0] in ('inspect','screenshot','copy-editor') and log.capacity()['exceeded']:
+        if log and args[0] in ('inspect','inspect-editor-ui','screenshot','copy-editor') and log.capacity()['exceeded']:
             raise Stop('log_capacity_exceeded','Private runtime storage limit reached; review retention before adding evidence')
         env = os.environ.copy()
         if self.token:
@@ -205,6 +205,16 @@ class Browser:
         snapshot = read(result['local_artifact'])
         if snapshot.get('nodes_truncated') or snapshot.get('text_truncated'):
             raise Stop('truncated_page','Rendered page was truncated')
+        return snapshot
+
+    def editor_ui(self):
+        """Rendered editor controls only; explicitly excludes article body evidence."""
+        result = self.command('inspect-editor-ui','editor-ui-'+uuid.uuid4().hex+'.json')
+        snapshot = read(result['local_artifact'])
+        if snapshot.get('nodes_truncated') is not False or snapshot.get('text_truncated') is not False:
+            raise Stop('truncated_page','Editor controls were truncated')
+        if snapshot.get('ui_only') is not True or snapshot.get('excluded_selector') != '.tn-page-vessel':
+            raise Stop('editor_ui_unverified','Bridge did not return the explicit controls-only view')
         return snapshot
 
     def click(self, node, frame=None):
