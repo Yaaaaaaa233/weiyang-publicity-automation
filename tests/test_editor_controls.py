@@ -75,7 +75,7 @@ process.stdout.write(JSON.stringify({wholeTruncated:whole.nodes_truncated,
  uiOnly:ui.ui_only,count:ui.nodes.length,labels:ui.nodes.map(n=>n.own_text),
  vessels:ui.nodes.filter(n=>n.class==='tn-page-vessel').length}));
 '''.replace('__SCRIPT__',json.dumps(browser.INSPECT_SCRIPT))
-        result=subprocess.run([shutil.which('node'),'-e',program],capture_output=True,text=True,check=True)
+        result=subprocess.run([shutil.which('node'),'-e',program],capture_output=True,text=True,encoding='utf-8',check=True)
         value=json.loads(result.stdout)
         self.assertTrue(value['wholeTruncated'])
         self.assertFalse(value['uiTruncated'])

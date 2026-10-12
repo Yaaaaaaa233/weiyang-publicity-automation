@@ -372,7 +372,7 @@ class CopyLifecycleTests(unittest.TestCase):
                 with self.assertRaises(Stop):
                     drafts.prepare({'row':1,'is_headline':True},{'id':'1','title':sample()['title']})
         self.assertEqual(events.count('click_saveas'),1)
-        saved=json.loads(drafts.index_path.read_text())['copies']['1']
+        saved=json.loads(drafts.index_path.read_text(encoding='utf-8'))['copies']['1']
         self.assertEqual(saved['copy_id'],'2')
         self.assertEqual(saved['phase'],'copy_created')
 
