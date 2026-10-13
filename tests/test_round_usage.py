@@ -134,6 +134,17 @@ class RoundUsageTests(unittest.TestCase):
                 c.main()
         self.assertEqual(self.commands, [])
 
+    def test_export_only_never_mutates_the_later_business_log(self):
+        payload,code=self.run_main('--export-only',fail_import=True)
+        self.assertEqual(code,0)
+        self.assertEqual(payload['import']['status'],'not_requested')
+        self.assertEqual(len(self.commands),1)
+        self.assertTrue(self.commands[0][0].endswith('dsh_usage_export.py'))
+
+    def test_export_only_still_refuses_a_crossing_call(self):
+        with self.assertRaises(RuntimeError):self.run_main('--export-only',fail_export=True)
+        self.assertEqual(len(self.commands),1)
+
     def test_a_session_log_inside_the_repository_must_be_private(self):
         with self.assertRaises(ValueError):
             c.session_path('scripts/collect_round_usage.py')

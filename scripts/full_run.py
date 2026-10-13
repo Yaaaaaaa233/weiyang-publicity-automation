@@ -161,6 +161,15 @@ def finish_submission(folder, state, log, execute=True):
     log.evidence(completion_path);save(folder/'state.json',state);return state
 
 
+def record_summary(log,state,status=None):
+    articles=state.get('formatted_articles',[])
+    notification=state.get('notification') or state.get('check_state',{}).get('notification',{})
+    count=state.get('reservation_count',getattr(log,'value',{}).get('reservation_count'))
+    log.result(status or state['phase'],reservation_count=count,
+               formatted_count=sum(a.get('format_verified') is True for a in articles),
+               notification_status=notification.get('status'),protected=True)
+
+
 def execute(config, run_id, execute=False, decisions=None, action=None, recovery=None):
     day=datetime.now(SHANGHAI).date().isoformat()
     folder=private_path('local/full-run/'+run_id);folder.mkdir(parents=True,exist_ok=True)
@@ -189,6 +198,7 @@ def execute(config, run_id, execute=False, decisions=None, action=None, recovery
                 raise Stop('check_state_incomplete','Checked state carries no observation; run the check again with a fresh identity')
             observation=read(private_path(checked['observation']))
             report=read(private_path(checked['report']))
+            state['reservation_count']=len(observation.get('reservation',{}).get('articles',[]))
             fresh=daily_check.evaluate(observation,day)
             if fresh['status']!=report['status'] or fresh['issues']!=report['issues']:
                 raise Stop('observation_stale','Start a fresh check; do not edit drafts from an expired observation')
@@ -259,7 +269,7 @@ def execute(config, run_id, execute=False, decisions=None, action=None, recovery
                         if recovery: drafts.attach(recovery['source_id'],recovery['draft_id'])
                         if action:
                             state['repair_result']=drafts.reconcile_repair(action['source_id']) if action.get('kind')=='reconcile' else drafts.action(action['source_id'],action)
-                            state['phase']='agent_format_required';save(path,state);log.result('agent_format_required',protected=True);return state
+                            state['phase']='agent_format_required';save(path,state);record_summary(log,state);return state
                         by_row={m['row']:m['candidates'][0] for m in observation['xiumi']['matches']}
                         articles={a['row']:a for a in observation['reservation']['articles']}
                         formatted=[]
@@ -272,7 +282,7 @@ def execute(config, run_id, execute=False, decisions=None, action=None, recovery
                                 state['notification']=send_notification(folder,state,
                                     notify_wecom.notification_heading(report)+'\n预约 '+str(len(report['ordered_rows']))+' 篇，已收齐。\n基础整理未完成：'+'、'.join(FORMAT_NOTES.get(k,'格式待核验') for k in formatted[-1]['format_issues'])+'。\n已保留副本与检查点，待完成格式处理。',
                                     )
-                                log.result('agent_format_required',reservation_count=len(report['ordered_rows']),protected=True)
+                                record_summary(log,state)
                                 save(path,state);return state
                         evidence=[p for a in formatted for p in a['evidence_paths']]
                         ledger.checkpoint('ready_for_review','format_verified',evidence,run_id)
@@ -305,6 +315,7 @@ def execute(config, run_id, execute=False, decisions=None, action=None, recovery
             if not state.get('notification_intent'):
                 msg=notify_wecom.notification_heading({'date':day,'run_id':run_id})+'\n执行中断：'+state['error_code']+'。\n整理或转存结果尚未全部确认；保留检查点，不重放未知操作。'
                 state['notification']=send_notification(folder,state,msg);save(path,state)
+            record_summary(log,state,'failed')
             raise
 
 

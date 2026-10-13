@@ -178,6 +178,9 @@ class Browser:
         except ValueError as exc:
             raise Stop('browser_unavailable','Browser bridge did not return a valid response') from exc
         if proc.returncode or result.get('ok') is not True:
+            if (args[0]=='inspect' and result.get('error')=='javascript error' and
+                'Inspection selector must match exactly one element.' in result.get('message','')):
+                raise Stop('inspection_scope_changed','Rendered inspection selector changed; rediscover before reading')
             raise Stop(result.get('error','browser_failed'),'Browser command failed; no automatic replay')
         value = result['result']
         if isinstance(value,dict) and value.get('local_artifact'):

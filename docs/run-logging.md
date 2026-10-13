@@ -79,3 +79,7 @@ python3 scripts/collect_round_usage.py --run RUN_ID --date YYYY-MM-DD \
 - **导出失败就不导入。** 命令在导出非零退出时直接失败，不会拿半个窗口去污染摘要。
 - **会话原始文件是私有证据**：不打包、不外发；仓库内只允许放在 `local/` 下。
 - 摘要里的 `usage` 仍是 `unknown/requests 0`，说明这一步没做；**不是零消耗**。
+
+## 独立 agent 窗口导出
+
+当模型调用早于业务 RunLog 起点时，不能修改业务 started_at。被测回合结束后，用真实事件边界及轮次调用 collect_round_usage.py 并加 --export-only：只生成本机私有逐调用记录和 meta.json，不导入业务摘要。默认不带此开关仍要求原有 RunLog 时间校验。独立窗口的 measured/partial/unknown 与业务摘要原来的 unknown 分开报告，不能把独立导出说成业务日志已经完整。压缩会话使用已有支持 zstandard 的解释器，不在业务运行中安装依赖。

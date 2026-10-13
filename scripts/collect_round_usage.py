@@ -69,6 +69,7 @@ def main():
     parser.add_argument('--end', required=True)
     parser.add_argument('--turn', type=int, action='append', required=True)
     parser.add_argument('--output')
+    parser.add_argument('--export-only',action='store_true',help='Measure the actual agent window without modifying a later-started business RunLog')
     args = parser.parse_args()
 
     start, end = stamp(args.start), stamp(args.end)
@@ -87,16 +88,18 @@ def main():
         raise RuntimeError('Usage export failed: ' + (exported.stderr or exported.stdout).strip())
 
     metadata = json.loads(output.with_suffix('.meta.json').read_text(encoding='utf-8'))
+    summary={'status':metadata['status'],'requests':metadata['requests'],
+             'turns':metadata['turns'],'window_start':metadata['window_start'],
+             'window_end':metadata['window_end'],'path':str(output.relative_to(root))}
+    if args.export_only:
+        return {'ok':True,'export':summary,'import':{'status':'not_requested',
+                'reason':'independent_agent_measurement; business log timestamps unchanged'}},0
     imported = call([root / 'scripts/run_log.py', 'usage',
                      '--run', args.run, '--date', args.date, '--file', output])
     if imported.returncode:
         raise RuntimeError('Usage import failed: ' + (imported.stderr or imported.stdout).strip())
-    return {'ok': True,
-            'export': {'status': metadata['status'], 'requests': metadata['requests'],
-                       'turns': metadata['turns'], 'window_start': metadata['window_start'],
-                       'window_end': metadata['window_end'],
-                       'path': str(output.relative_to(root))},
-            'import': json.loads(imported.stdout)}, 0
+    return {'ok':True,'export':summary,'import':json.loads(imported.stdout)},0
+
 
 
 if __name__ == '__main__':

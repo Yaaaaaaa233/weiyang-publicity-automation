@@ -113,7 +113,7 @@ def title_input(nodes):
                and n.get('placeholder') == TITLE_PLACEHOLDER, 'draft_title_missing')
 
 
-def body_scope(browser, identifier):
+def _body_scope_once(browser, identifier):
     """Find the narrowest ancestor that holds BOTH the body vessel and the title input.
 
     A whole-page read is capped at 3000 visible elements, and the 2026-10-12 18:10 round died there
@@ -182,6 +182,33 @@ def body_scope(browser, identifier):
     return None
 
 
+def body_scope(browser, identifier):
+    # Only a proven inspect-selector race is retried, using freshly read paths.
+    # Do not climb ancestors of a path that has already disappeared.
+    for attempt in range(3):
+        try:return _body_scope_once(browser, identifier)
+        except Stop as exc:
+            if exc.code!='inspection_scope_changed' or attempt==2:raise
+            if paper_id(browser.command('observe')['url'])!=identifier:
+                raise Stop('draft_identity_changed','Editor changed during scope rediscovery') from exc
+            time.sleep(.2)
+
+
+def delete_control(nodes):
+    # Real Xiumi component menus use an icon-only button. The text "删除"
+    # on div.prompt belongs to the drag/drop receiver, not a clickable button.
+    candidates=[]
+    for n in nodes:
+        if (n.get('tag')!='button' or not has_class(n,'op-bar-btn') or
+            'dc-cp-delete' not in n.get('parent_class','').split() or n.get('disabled') is not False):
+            continue
+        icons=[c for c in nodes if c.get('selector','').startswith(n['selector']+' > ')
+               and has_class(c,'op-bar-icon') and has_class(c,'delete')]
+        if len(icons)==1:candidates.append(n)
+    if not candidates:raise Stop('delete_control_missing','Verified component delete button was not found')
+    return one(candidates,lambda n:True,'delete_control_ambiguous')
+
+
 def snapshot_body(browser, identifier):
     def ready(s):
         try:
@@ -194,7 +221,17 @@ def snapshot_body(browser, identifier):
     # is fixed for the life of the page, so discovering it once is enough; a failure to identify it
     # is not fatal, it just means the whole page is read as before.
     scope = body_scope(browser, identifier)
-    read = (lambda: browser.snapshot(selector=scope)) if scope else browser.snapshot
+    rediscoveries=0
+    def read():
+        nonlocal scope,rediscoveries
+        while True:
+            try:return browser.snapshot(selector=scope) if scope else browser.snapshot()
+            except Stop as exc:
+                if exc.code!='inspection_scope_changed' or rediscoveries>=2:raise
+                rediscoveries+=1
+                if paper_id(browser.command('observe')['url'])!=identifier:
+                    raise Stop('draft_identity_changed','Editor changed during body read') from exc
+                scope=body_scope(browser,identifier)
     first=browser.wait(ready, read=read)
     previous=content(first)
     deadline=time.monotonic()+30
@@ -438,7 +475,8 @@ class Drafts:
                 raise Stop('repair_action_unsupported','Only immediate top-level neighbors of the tail are eligible')
             reserve();self.browser.click(node)
             toolbar=editor_controls(self.browser,record['copy_id'])
-            delete=one(toolbar['nodes'],lambda n:n.get('own_text')=='删除' and n.get('tag') in ('a','span','button'),'delete_control_ambiguous')
+            delete=delete_control(toolbar['nodes'])
+            self.browser.command('check-empty',node['selector'])
             self.browser.click(delete)
         elif kind=='replace_credit':
             text=node.get('rendered_text','')
@@ -457,6 +495,12 @@ class Drafts:
             self.browser.command('key','SelectAll');self.browser.command('type','0');self.browser.command('key','Tab')
         else:raise Stop('repair_action_unsupported','Unsupported repair action')
         snapshot,value=snapshot_body(self.browser,record['copy_id'])
+        if kind=='delete_empty_component':
+            after_vessel=one(snapshot['nodes'],lambda n:has_class(n,'tn-page-vessel'))
+            after_tops=[n for n in snapshot['nodes'] if has_class(n,'tn-comp-top-level') and
+                        n.get('selector','').startswith(after_vessel['selector']+' > ')]
+            if len(after_tops)!=len(tops)-1:
+                raise Stop('delete_outcome_unverified','Exactly one empty component must disappear; retain repair intent')
         baseline=read(private_path(record['baseline']))
         if not preservation(baseline,value,self.rules):
             raise Stop('repair_preservation_failed','Repair changed protected body content; retain intent and baseline')
