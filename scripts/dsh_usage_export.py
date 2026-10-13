@@ -108,7 +108,7 @@ def main():
         import zstandard
         with zstandard.ZstdDecompressor().stream_reader(raw) as reader:
             raw = reader.read()
-    records, metadata = export((json.loads(line) for line in raw.decode('utf-8').splitlines() if line.strip()),
+    records, metadata = export((json.loads(line) for line in raw.decode('utf-8').split('\n') if line.strip()),
                                args.start, args.end, set(args.turn))
     metadata['source_sha256'] = digest
     args.output.parent.mkdir(parents=True, exist_ok=True)

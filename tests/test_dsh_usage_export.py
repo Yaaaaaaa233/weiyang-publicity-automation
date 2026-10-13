@@ -1,4 +1,9 @@
 import unittest
+import json
+import tempfile
+import contextlib
+import io
+from unittest.mock import patch
 from datetime import datetime, timezone, timedelta
 import sys
 from pathlib import Path
@@ -36,3 +41,20 @@ class UsageExport(unittest.TestCase):
     def test_token_identity_change_rejected(self):
         self.events[2]['data']['usage']['totalTokens']=99
         with self.assertRaises(ValueError):self.run_export()
+
+    def test_cli_preserves_unicode_line_separators_inside_json_records(self):
+        import dsh_usage_export as module
+        self.events[2]['data']['message']['content']='private'+chr(0x85)+chr(0x2028)+chr(0x2029)+'content'
+        for newline in ('\n','\r\n'):
+            with self.subTest(newline=repr(newline)),tempfile.TemporaryDirectory() as tmp:
+                path=Path(tmp)/'session.jsonl';out=Path(tmp)/'usage.json'
+                raw=newline.join(json.dumps(e,ensure_ascii=False) for e in self.events)+newline
+                path.write_bytes(raw.encode('utf-8'))
+                argv=['export','--session',str(path),'--start',self.start.isoformat(),
+                      '--end',(self.start+timedelta(seconds=10)).isoformat(),'--turn','1','--output',str(out)]
+                with patch.object(sys,'argv',argv),contextlib.redirect_stdout(io.StringIO()):module.main()
+                records=json.loads(out.read_text(encoding='utf-8'))
+                meta=json.loads(out.with_suffix('.meta.json').read_text(encoding='utf-8'))
+                self.assertEqual(len(records),1);self.assertEqual(meta['status'],'measured')
+                self.assertNotIn('private',out.read_text(encoding='utf-8'))
+                self.assertEqual(records[0]['input_tokens'],10)
