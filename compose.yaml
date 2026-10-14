@@ -5,8 +5,14 @@ services:
       context: .
       dockerfile: browser/Dockerfile
     shm_size: 2gb
+    # Survive a host reboot without a manual `docker compose up -d`: an unattended run
+    # must not depend on an interactive container rebuild.
+    restart: unless-stopped
     ports:
       - "127.0.0.1:${BROWSER_VIEW_PORT:-7900}:7900"
+      # Selenium driver endpoint. Published on loopback only; the container is
+      # unauthenticated, so never bind this to a routable address.
+      - "127.0.0.1:${BROWSER_DRIVER_PORT:-4444}:4444"
     environment:
       SE_VNC_PASSWORD: ${BROWSER_VIEW_PASSWORD:?Run scripts/init_local.py first}
       SE_NODE_MAX_SESSIONS: "1"

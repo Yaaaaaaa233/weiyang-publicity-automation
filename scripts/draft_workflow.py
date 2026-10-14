@@ -74,6 +74,22 @@ def content(snapshot):
     if not title.get('value'):
         raise Stop('draft_title_missing','Wait for editor metadata')
     children=[n for n in nodes if n.get('selector','').startswith(vessel['selector']+' > ')]
+    # Xiumi mounts the global-format control inside the vessel, after all article
+    # components. Remove only that uniquely observed UI suffix, never a text pattern.
+    ui=[n for n in children if has_class(n,'global-format')]
+    editor_suffix=None
+    text=vessel.get('rendered_text','')
+    if ui:
+        sections=[n for n in children if has_class(n,'tn-comp-top-level')]
+        if (len(ui)!=1 or ui[0].get('rendered_text_truncated')
+                or any(ui[0]['selector'].startswith(n['selector']+' > ') for n in sections)):
+            raise Stop('body_controls_ambiguous','Global format control overlaps article content')
+        editor_suffix=ui[0].get('rendered_text')
+        if not editor_suffix or not text.endswith(editor_suffix):
+            raise Stop('body_controls_ambiguous','Observed control is not the vessel suffix')
+        text=text[:-len(editor_suffix)]
+        children=[n for n in children if n['selector']!=ui[0]['selector']
+                  and not n['selector'].startswith(ui[0]['selector']+' > ')]
     r=vessel['rect']
     images=[i for i in snapshot.get('images',[]) if r['x']<=i['rect']['x']<r['x']+r['width'] and r['y']<=i['rect']['y']<r['y']+r['height']]
     if any(not i.get('complete') or i.get('natural_width',0)<=0 or i.get('natural_height',0)<=0 for i in images):
@@ -91,7 +107,8 @@ def content(snapshot):
                any(c['selector'].startswith(n['selector']+' > ') for c in cover_nodes)]
     metadata=max(ancestors,key=lambda n:len(n['selector'])) if ancestors else None
     covers=[c.get('inline_style','') for c in cover_nodes if metadata and c['selector'].startswith(metadata['selector']+' > ')]
-    return {'cover_styles':covers,'id':identifier,'title':title['value'],'text':vessel.get('rendered_text',''),
+    return {'cover_styles':covers,'id':identifier,'title':title['value'],'text':text,
+            'editor_text_suffix':editor_suffix,
             'paragraphs':paragraphs,'images':image_values,'backgrounds':backgrounds,
             'head_style':sections[0].get('inline_style','') if sections else None,
             'head_spacing':sections[0].get('component_spacing') if sections else None,
@@ -185,13 +202,32 @@ def _body_scope_once(browser, identifier):
 def body_scope(browser, identifier):
     # Only a proven inspect-selector race is retried, using freshly read paths.
     # Do not climb ancestors of a path that has already disappeared.
-    for attempt in range(3):
+    deadline=time.monotonic()+30
+    for attempt in range(12):
         try:return _body_scope_once(browser, identifier)
         except Stop as exc:
-            if exc.code!='inspection_scope_changed' or attempt==2:raise
+            if (exc.code!='inspection_scope_changed' or attempt==11
+                    or time.monotonic()>=deadline):raise
             if paper_id(browser.command('observe')['url'])!=identifier:
                 raise Stop('draft_identity_changed','Editor changed during scope rediscovery') from exc
-            time.sleep(.2)
+            time.sleep(.5)
+
+
+def credit_focus_target(nodes, node):
+    # editable on a span is inherited; activeElement belongs to its editing host.
+    # Only credit-only hosts are eligible; the bridge selects the target leaf range.
+    ancestors=[n for n in nodes if (n.get('selector')==node['selector'] or
+               node['selector'].startswith(n.get('selector','')+' > '))
+               and n.get('editable_attribute') in ('true','')]
+    if not ancestors:
+        raise Stop('credit_editing_host_missing','No explicit editing host; do not type')
+    host=max(ancestors,key=lambda n:len(n['selector']))
+    descendants=[n for n in nodes if n.get('selector','').startswith(host['selector']+' > ')]
+    if (host.get('rendered_text_truncated') or
+            any(not CREDIT.match(line.strip()) for line in host.get('rendered_text','').split('\n') if line.strip()) or
+            any(n.get('tag') not in ('p','br','span') for n in descendants)):
+        raise Stop('credit_editing_host_complex','Editing host contains other content; do not select all')
+    return host
 
 
 def delete_control(nodes):
@@ -312,11 +348,24 @@ def normalized_credits(text):
     return '\n'.join(lines)
 
 
+def comparison_text(value, peer):
+    # Old baselines include the UI. Keep their bytes unchanged; compare them only
+    # against the exact suffix independently located outside components in a new read.
+    text=value['text']
+    suffix=peer.get('editor_text_suffix')
+    if 'editor_text_suffix' not in value and suffix:
+        if not text.endswith(suffix):
+            raise Stop('legacy_body_scope_unverified','Old text lacks the currently observed control suffix')
+        text=text[:-len(suffix)]
+    return text
+
+
 def preservation(before, after, rules=None):
     """Only known credit separators and additive, evidenced head/tail images may change."""
     if rules is None:
-        return all(before[k]==after[k] for k in ('text','paragraphs','images','backgrounds'))
-    if normalized_credits(before['text']).strip()!=normalized_credits(after['text']).strip():return False
+        return (comparison_text(before,after)==comparison_text(after,before)
+                and all(before[k]==after[k] for k in ('paragraphs','images','backgrounds')))
+    if normalized_credits(comparison_text(before,after)).strip()!=normalized_credits(comparison_text(after,before)).strip():return False
     def ps(value):
         result=[{'text':normalized_credits(p['text'] or ''),'style':p['style']} for p in value['paragraphs']]
         while result and not result[0]['text'].strip():result.pop(0)
@@ -371,7 +420,7 @@ class Drafts:
                 raise Stop('copy_outcome_unknown','Reconcile actual library and attach the existing copy; never repeat save-as')
             self.browser.command('open',editor_url(source))
             snapshot,value=snapshot_body(self.browser,source)
-            if body_signature(value)!=body_signature(baseline) or value['title']!=candidate['title']:
+            if not preservation(baseline,value) or value['title']!=candidate['title']:
                 raise Stop('source_changed','Source changed since baseline')
             snapshot=editor_controls(self.browser,record['copy_id'] or source)
             more=one(snapshot['nodes'],lambda n:n.get('own_text')=='更多' and n.get('tag')=='span')
@@ -476,7 +525,15 @@ class Drafts:
             reserve();self.browser.click(node)
             toolbar=editor_controls(self.browser,record['copy_id'])
             delete=delete_control(toolbar['nodes'])
-            self.browser.command('check-empty',node['selector'])
+            # Selection injects editor chrome into the component (Windows r12c).
+            # The complete, hidden-descendant emptiness check must run BEFORE
+            # selection. Afterwards verify identity and content, not editor chrome.
+            selected,selected_value=snapshot_body(self.browser,record['copy_id'])
+            selected_tops=[n for n in selected['nodes'] if has_class(n,'tn-comp-top-level')
+                           and has_class(n,'tn-on-single-select')]
+            if (len(selected_tops)!=1 or selected_tops[0]['selector']!=node['selector']
+                    or body_signature(selected_value)!=body_signature(value)):
+                raise Stop('delete_selection_unverified','Selection or body changed; do not delete')
             self.browser.click(delete)
         elif kind=='replace_credit':
             text=node.get('rendered_text','')
@@ -485,8 +542,12 @@ class Drafts:
                 raise Stop('complex_credit','Mixed styles or complex credits require a reviewed operation')
             replacement=normalized_credits(text)
             if replacement==text:raise Stop('repair_unnecessary','Credit already conforms')
-            reserve();self.browser.command('focus',node.get('stable_selector') or node['selector'])
-            self.browser.command('key','SelectAll');self.browser.command('type',replacement);self.browser.command('key','Tab')
+            host=credit_focus_target(snapshot['nodes'],node)
+            if node.get('tag')!='span' or children:
+                raise Stop('complex_credit','Range replacement requires one complete credit leaf')
+            reserve();self.browser.command('replace-credit',node['selector'],host['selector'],text,replacement)
+            # Tab is handled as inserted whitespace by this contenteditable editor.
+            # The atomic bridge already verifies the replacement; later native clicks commit it.
         elif kind=='zero_spacing':
             parents=[n for n in targets.values() if node['selector'].startswith(n['selector']+' > ')]
             if node.get('tag')!='input' or not any(n.get('rendered_text','').strip() in ('组前距','组后距') for n in parents):

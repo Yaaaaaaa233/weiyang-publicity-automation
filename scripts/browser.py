@@ -11,6 +11,7 @@ except ImportError:
     fcntl = None  # Windows can import pure helpers; commands still require the Linux container.
 import json
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -271,6 +272,81 @@ def hover_element(sid, selector):
     }]})
 
 
+CREDIT_STYLE_SCRIPT = r"""
+const creditSignature=host=>[host,...host.querySelectorAll('*')].map(e=>({
+ tag:e.tagName,
+ style:[...e.style].filter(p=>p!=='font-size').sort().map(p=>[p,e.style.getPropertyValue(p),e.style.getPropertyPriority(p)]),
+ fontSize:getComputedStyle(e).fontSize,
+ fontSizePriority:e.style.getPropertyPriority('font-size')
+}));
+"""
+
+CREDIT_RANGE_SCRIPT = CREDIT_STYLE_SCRIPT + r"""
+const [targetSelector,hostSelector,expected,mode,replacement]=arguments;
+const targets=document.querySelectorAll(targetSelector),hosts=document.querySelectorAll(hostSelector);
+if(targets.length!==1||hosts.length!==1)return {ok:false,reason:'identity'};
+const target=targets[0],host=hosts[0];
+const visible=e=>{const r=e.getBoundingClientRect();const st=getComputedStyle(e);return r.width>0&&r.height>0&&st.display!=='none'&&st.visibility!=='hidden';};
+if(!host.contains(target)||!visible(target)||!visible(host)||
+ !host.isContentEditable||!host.hasAttribute('contenteditable')||
+ !['true',''].includes(host.getAttribute('contenteditable'))||
+ target.tagName!=='SPAN'||target.children.length!==0||
+ (target.innerText||'')!==expected||!/^(策划|文案|文字|供稿|编辑|排版|摄影|审核|责编|审校)\s*[|｜丨]/.test(expected)||
+ [...host.querySelectorAll('*')].some(n=>!['P','BR','SPAN'].includes(n.tagName)))
+ return {ok:false,reason:'scope'};
+const rows=(host.innerText||'').split('\n').filter(x=>x.trim());
+if(!rows.length||rows.some(x=>!/^(策划|文案|文字|供稿|编辑|排版|摄影|审核|责编|审校)\s*[|｜丨]/.test(x.trim())))return {ok:false,reason:'host_text'};
+const signature=creditSignature(host);
+if(mode==='select'){
+ if(document.activeElement!==host)return {ok:false,reason:'focus'};
+ const range=document.createRange();range.selectNodeContents(target);
+ const selection=window.getSelection();selection.removeAllRanges();selection.addRange(range);
+ if(selection.rangeCount!==1||selection.toString()!==expected||
+ selection.getRangeAt(0).startContainer!==target||selection.getRangeAt(0).endContainer!==target)
+ return {ok:false,reason:'selection'};
+}
+return {ok:true,host,target,signature};
+"""
+
+
+def replace_credit_text(sid, target_selector, host_selector, expected, replacement, *, diagnose_only=False):
+    # Only the proven separator normalisation is allowed. No arbitrary editor input.
+    if (not re.match(r'^(策划|文案|文字|供稿|编辑|排版|摄影|审核|责编|审校)\s*[|｜丨]',expected)
+            or replacement!=re.sub(r'\s*[|｜丨]\s*','丨',expected) or replacement==expected):
+        raise BrowserError('credit replacement invalid','Only credit separators may be normalised')
+    def check(mode):
+        result=call('POST',session_path(sid,'/execute/sync'),
+                    {'script':CREDIT_RANGE_SCRIPT,'args':[target_selector,host_selector,expected,mode,replacement]})
+        if result.get('ok') is not True:
+            raise BrowserError('credit range unverified','Credit range guard failed: '+str(result.get('reason')))
+        return result
+    before=check('inspect')
+    host=before['host'][ELEMENT_KEY]
+    call('POST',session_path(sid,'/element/'+host+'/click'),{})
+    selected=check('select')
+    changes={'host_changed':selected['host'][ELEMENT_KEY]!=host,
+             'target_changed':selected['target']!=before['target'],
+             'signature_changed':selected['signature']!=before['signature']}
+    evidence={**changes,'before_signature':before['signature'],
+              'selected_signature':selected['signature']}
+    if diagnose_only:
+        return {'diagnosis':evidence,'typed':False}
+    if any(changes.values()):
+        raise BrowserError('credit range changed','Editor changed while selecting; do not type: '+json.dumps(evidence,ensure_ascii=False))
+    # Send normal browser keys to the already active host; never SelectAll or DOM replacement.
+    call('POST',session_path(sid,'/element/'+host+'/value'),{'text':replacement})
+    after=call('POST',session_path(sid,'/execute/sync'),{'script':CREDIT_STYLE_SCRIPT + r"""
+const targets=document.querySelectorAll(arguments[0]),hosts=document.querySelectorAll(arguments[1]);
+if(targets.length!==1||hosts.length!==1)return {ok:false};
+const target=targets[0],host=hosts[0];
+return {ok:host.contains(target)&&(target.innerText||'')===arguments[2],
+ signature:creditSignature(host)};
+""",'args':[target_selector,host_selector,replacement]})
+    if after.get('ok') is not True or after.get('signature')!=before['signature']:
+        raise BrowserError('credit replacement unverified','Replacement or inline styles differ; keep pending intent')
+    return {'replaced':True,**observe(sid)}
+
+
 def type_active(sid, text):
     element = call('GET', session_path(sid, '/element/active'))[ELEMENT_KEY]
     call('POST', session_path(sid, '/element/' + element + '/value'), {'text': text})
@@ -436,6 +512,8 @@ def main():
         sub.add_parser(name)
     p = sub.add_parser('close-window');p.add_argument('handle');p.add_argument('--expect-url',required=True);p.add_argument('--return-to',required=True)
     p = sub.add_parser('switch-window'); p.add_argument('handle')
+    p = sub.add_parser('replace-credit'); p.add_argument('target'); p.add_argument('host'); p.add_argument('expected'); p.add_argument('replacement')
+    p = sub.add_parser('diagnose-credit'); p.add_argument('target'); p.add_argument('host'); p.add_argument('expected'); p.add_argument('replacement')
     p = sub.add_parser('focus'); p.add_argument('selector')
     p.add_argument('--frame')
     p = sub.add_parser('click-element'); p.add_argument('selector')
@@ -479,6 +557,10 @@ def main():
             return {'reused': reused, **observe(sid)}
         sid = existing()
         enter_frame(sid,None)
+        if args.command == 'replace-credit':
+            return replace_credit_text(sid,args.target,args.host,args.expected,args.replacement)
+        if args.command == 'diagnose-credit':
+            return replace_credit_text(sid,args.target,args.host,args.expected,args.replacement,diagnose_only=True)
         if args.command == 'check-empty':
             return empty_component(sid,args.selector)
         if args.command == 'copy-editor':
