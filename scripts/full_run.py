@@ -38,6 +38,17 @@ def config_signature(config):
 SEMANTIC_IDENTITY_ISSUES = ('identity_or_week_unresolved', 'candidate_identity_unresolved',
                             'identity_match_reason_missing')
 
+def identity_review_rows(report):
+    """Other blocked rows must not hide an independently reviewable manuscript.
+
+    This opens body collection only; evaluate() still blocks formatting and sync
+    while any missing/reserved/transferred/ambiguous row remains unresolved.
+    """
+    if report.get('status') in ('check_failed', 'no_reservations'):
+        return set()
+    return {i['row'] for i in report.get('issues', [])
+            if i.get('code') in SEMANTIC_IDENTITY_ISSUES and 'row' in i}
+
 def transfer_tags_enabled():
     """Platform-side tagging is paused by default (operator decision, 2026-10-10).
 
@@ -211,8 +222,9 @@ def execute(config, run_id, execute=False, decisions=None, action=None, recovery
                            notification_status=state.get('notification',{}).get('status'),protected=report['status']!='no_reservations')
                 save(path,state);return state
             if not report['ready_to_format']:
-                # Only semantic identity issues can go to the agent. Missing drafts and login failures are final check outcomes.
-                semantic=bool(report['issues']) and all(i['code'] in SEMANTIC_IDENTITY_ISSUES for i in report['issues'])
+                # Review semantic rows independently; other issues still block formatting and sync.
+                review_rows=identity_review_rows(report)
+                semantic=bool(review_rows)
                 if semantic:
                     with daily_run.local_lock(uuid.uuid4().hex):
                         ledger=daily_run.Ledger(config,day,'full-body-'+uuid.uuid4().hex)
@@ -224,6 +236,7 @@ def execute(config, run_id, execute=False, decisions=None, action=None, recovery
                                 with browser.reserved(), log.stage('body_collection'):
                                     browser.command('start')
                                     for match in observation['xiumi']['matches']:
+                                        if match['row'] not in review_rows:continue
                                         candidates=[]
                                         for c in match['candidates']:
                                             if c.get('available') is False:continue

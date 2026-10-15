@@ -1,0 +1,60 @@
+{
+  "name": "weiyang-publicity-control",
+  "private": true,
+  "version": "0.2.3",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node receiver.mjs"
+  },
+  "exports": {
+    "./desktop-plugin": "./desktop-plugin.mjs",
+    ".": "./desktop-ui-host.mjs",
+    "./client": "./desktop-client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "desktop-plugin.mjs",
+    "desktop-bridge.mjs",
+    "cordis.patch.yml",
+    "desktop-worker.mjs",
+    "desktop-ui-host.mjs",
+    "desktop-client.js"
+  ],
+  "description": "指定运营群固定指令投递到专用 DSH 会话；沿用桌面登录，不改权限，默认关闭真实业务。",
+  "dsh": {
+    "engines": {
+      "dsh": ">=0.2.0-rc.2 <0.3.0"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-plugin-manager"
+      ]
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4 <5",
+    "@deepseek-ai/dsh-llm": "0.2.0-rc.2",
+    "@deepseek-ai/schemastery": "*"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-llm": {
+      "optional": true
+    },
+    "@deepseek-ai/schemastery": {
+      "optional": true
+    }
+  },
+  "dependencies": {
+    "@wecom/aibot-node-sdk": "1.0.7"
+  }
+}

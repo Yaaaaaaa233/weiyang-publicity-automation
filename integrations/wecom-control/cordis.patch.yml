@@ -1,0 +1,10 @@
+- insert:
+    - id: weiyang-publicity-control
+      name: weiyang-publicity-control/desktop-plugin
+      disabled: true
+      config:
+        enabled: false
+        projectRoot: ''
+        configPath: local/wecom-control-test/config.json
+    - id: weiyang-publicity-control-ui
+      name: weiyang-publicity-control

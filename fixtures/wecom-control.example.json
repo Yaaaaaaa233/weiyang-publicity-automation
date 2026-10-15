@@ -1,0 +1,10 @@
+{
+  "mode": "queue_only",
+  "bot_id": "",
+  "bot_name": "运营测试机器人",
+  "purpose": "bridge_test",
+  "business_executor_enabled": false,
+  "desktop_session_id": "",
+  "allowed_chat_ids": [],
+  "allowed_user_ids": []
+}
