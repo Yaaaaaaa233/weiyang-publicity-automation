@@ -1,12 +1,14 @@
 # 企业微信手动触发与 DSH 桌面会话接续
 
-更新：2026-10-14。使用者选择沿用 DSH 桌面端登录，不配置独立 DeepSeek API Key。实现使用 DSH 原生插件服务，不模拟键盘、不导出桌面模型凭据。
+更新：2026-10-15。使用者选择沿用 DSH 桌面端登录，不配置独立 DeepSeek API Key。实现使用 DSH 原生插件服务，不模拟键盘、不导出桌面模型凭据。
 
 ## 当前验收状态
 
-代码、队列迁移、桌面插件包及离线测试已完成。Python 全套 353 项通过（包含 Node 测试入口），Node 桌面适配器 9 个场景通过。尚未在真实 DSH 会话完成模型执行，也未接通真实群消息；不能把离线假 agent 回放描述为真实 agent 验收通过。未运行新的业务、提交公众号同步、发送群通知或变更 Windows 调度。
+Mac 和 Windows 插件 0.2.3 的桌面连接段均已通过，业务开关保持关闭。Mac 验证本机入队到模型回执；Windows 验证交付的独立测试队列到指定标准模式会话、模型执行及 bridge_verified 回执。Windows 请求由 Mac 生成后传入，尚不能证明 Windows 本机入队入口或企业微信群入站通过。
 
-本机应用自带 DSH CLI 实测版本 `0.2.0-rc.2`。安装包声明同系列兼容范围。桌面 profile 明确拒绝 CLI 管理，返回 `profile "desktop" is managed exclusively by the Electron application`；该次安装未成功，不通过手改 profile 绕过。包已放在私有 `local/mac-control-preview-20261014/weiyang-publicity-control-0.2.0.tgz`，已由使用者通过 DSH 桌面插件安装入口安装，随后在真实“已安装”列表核对到插件且开关关闭。配置详情与专用会话尚未绑定，未启用或投递探针。
+Windows 已部署 d551894 快照及两份 SQLite 测试修复。Python 3.12 和 3.13 均运行 354 项：350 通过、4 项缺 Node 跳过、0 错误；Mac 354 项通过。Windows 专用会话实际权限为“工作区内修改”，Auto review 尚未验收；探针中的一次 PowerShell ACL 初始化错误由现有文件工具接续完成，未修改 ACL，无人工审批或救场消息。
+
+真实企业微信群入站、业务多轮检查点接续及完整业务仍待验收。私有配置保持 desktop/bridge_test、business_executor_enabled=false，机器人、群和成员尚未绑定。不得把人工提示、本地探针或插件已加载当成群触发成功。详细证据见文末实测更新及忽略目录 local/windows-desktop-bridge-20261015。
 
 ## 运行链
 
@@ -48,7 +50,7 @@
 python3 scripts/wecom_control.py --config local/wecom-control-test/config.json --op enqueue-test
 ```
 
-这是本机操作员发起的最小探针，不需要 Bot ID、Secret 或空名单放行。队列保留 `origin=local_bridge_test`，只允许 bridge_test，不能升级或触发真实业务。其成功只能证明“本机入队 → DSH 会话接续”，不能证明企业微信群真实收发已经接通。该真实探针目前仍未执行，等待安装和绑定。
+这是本机操作员发起的最小探针，不需要 Bot ID、Secret 或空名单放行。队列保留 `origin=local_bridge_test`，只允许 bridge_test，不能升级或触发真实业务。其成功只能证明“本机入队 → DSH 会话接续”，不能证明企业微信群真实收发已经接通。Mac 本机探针与 Windows 桌面段已通过，范围见当前验收状态；真实群消息尚未验证。
 
 ## 接续与防重边界
 
@@ -64,7 +66,7 @@ python3 scripts/wecom_control.py --config local/wecom-control-test/config.json -
 
 ## 真实验收顺序
 
-先加载插件、绑定专用会话，用 bridge_test 验证一次模型接续和私有回执；再验证指定群的真实消息接收、重复消息只入队一次、任务忙时不并行及查询结果；最后在唯一业务节点启用 business，核对完整流程及企业微信通知。当前这三步真实验收均尚未通过。
+先加载插件、绑定专用会话，用 bridge_test 验证一次模型接续和私有回执；再验证指定群的真实消息接收、重复消息只入队一次、任务忙时不并行及查询结果；最后在唯一业务节点启用 business，核对完整流程及企业微信通知。第一步桌面段已在 Mac 和 Windows 通过，具体范围见当前验收状态；后两步尚未通过。
 
 源码依据：企业微信官方 SDK https://github.com/WecomTeam/aibot-node-sdk；DSH Agent/Session 原生接口 https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/core.zh.md。实现另核对了本机应用内置源码，不依赖从桌面进程提取密钥或未经文档说明的远程 HTTP 接口。
 
@@ -95,3 +97,25 @@ python3 scripts/wecom_control.py --config local/wecom-control-test/config.json -
 新探针完成：本机入队 → worker 原子预留 → 指定标准模式会话收到执行请求 → 持久 inbox → 模型读取 AGENTS 并写 JSON → 回读 request/run/status → journal bridge_verified。原生界面显示该轮约 36 秒，6 步（包括之前初始化累计显示）；本轮无需额外审批或人工救场。真实工作目录、独立消息 ID 和回执在私有状态中核对。没有浏览器业务、转存、群通知、API Key 导出或调度变更；Windows 仍是业务执行节点。Python 354 项和 Node 12 场景通过。
 
 此验收只覆盖 local_bridge_test 的桌面段，不能称为群触发通过，也不能称为完整业务或有检查点的多轮接续通过。真实机器人入口、群与成员绑定及入站消息仍未接通。后续先验证真实机器人权限/入口，保持 purpose=bridge_test；取得真实群消息后才验证整个输入链。
+
+## 2026-10-15 Windows 桌面段通过
+
+Windows GUI 已核对插件 0.2.3、项目路径及 py 解释器；真实标准模式会话的存储头与项目目录一致。业务关闭的 local_bridge_test 请求由操作员在 Mac 生成全新队列，确认 Windows 尚无队列后经 UU 传入，再由插件自动投递。模型读取规则并回写匹配 request/run 的回执，取回 SQLite 确认 bridge_verified、真实 message_id 及会话绑定。此步骤证明 Windows 队列到真实模型会话的桌面段，不证明 Windows 本机入队入口或企业微信群入站。
+
+GUI 开启和部署有人工参与，测试投递后无人工审批或救场消息。会话实际权限显示“工作区内修改”，不是 Auto review；一次 PowerShell 工作区 ACL 初始化失败后，模型改用已有文件工具完成，未更改 ACL。Auto review、业务多轮检查点接续与完整转存仍待验收。私有配置保持 bridge_test、business_executor_enabled=false，机器人及群成员绑定为空；不以本地成功开启业务或接收任意群消息。私有回传及复核位于 local/windows-desktop-bridge-20261015。
+
+## 2026-10-15 Windows 团队入口核查
+
+在使用者打开的目标团队客户端中，侧栏实见消息、日程、待办、会议、微文档、微盘、通讯录、高级功能及我的企业，没有工作台。高级功能已打开，当前可见的是获客助手、外部联系人规模、邮件及文档等入口，未见智能机器人。客户端关于页版本为 5.0.12.6018；已点击检查更新，但未取得明确的最新版本或可更新回执，不能称已确认最新版。团队切换菜单显示当前选中的是带 # 图标的团队，未切换至其他组织。
+
+这些观察证明当前账号界面缺少官方指南所述入口，尚不能单凭此判定所有团队均不支持，或认定修改管理员权限一定能解决。接下来需核对目标团队类型的官方支持范围及创建权限；在此之前真实群入站保持未验收，不创建替代企业、不变更组织、不把既有消息推送 Webhook 当成接收接口。桌面接续的既有通过结果继续有效。
+
+### 补充：官方扫码创建路径
+
+继续查证发现，缺少工作台不能作为不支持机器人接入的结论。腾讯云官方远程终端文档明确列出两种方式：扫码创建并授权机器人，或工作台手动创建（https://cloud.tencent.com/document/product/1759/132562）。企业微信官方开源 WecomTeam/wecom-cli 的 auth init 支持扫码创建绑定，并支持 --no-browser、--output-qrcode；配置默认加密保存，可通过 WECOM_CLI_CONFIG_DIR 隔离（https://github.com/WecomTeam/wecom-cli/blob/main/docs/cli-reference.md）。这条官方路径值得独立验证，不要求安装新的 DSH 第三方通道插件，也不能据此推断当前团队必然支持多人群触发。
+
+当前仅确认官方存在扫码创建绑定机制；目标团队实际可选范围、授权权限、机器人能否入指定群、是否限制创建者及其他成员能否触发，均须真实授权页及收消息实测。不得根据群成员数推断企业人数或授权资格，不通过其他云平台代建并转交凭据。首次验证应隔离私有凭据、保持业务关闭，先展示授权范围，新增凭据/权限及协议由使用者在当次操作确认。现有通知 Webhook 不变。此次未安装 CLI、未扫码授权、未创建机器人。
+
+### 扫码实际结果（2026-10-15，2026-10-17 整理）
+
+Mac 私有目录安装官方 @wecom/cli 1.3.4，生成二维码后，使用者手机进入“请先创建智能机器人 / 一键创建智能机器人”页面。使用者报告点击后立即“参数不合法”，无错误码、未进入团队选择，并确认手机客户端已是最新版本。未获得创建成功或授权完成回执，不将原因认定为团队不支持，也不宣称扫码路径已接通。旧码超时记录与本轮日志保留私有目录；未将凭据接入接收器，业务保持关闭。后续需平台进一步诊断或替代触发入口，避免反复创建。

@@ -1,3 +1,4 @@
+from contextlib import closing
 from datetime import datetime, timezone
 import sqlite3
 import tempfile
@@ -30,7 +31,7 @@ class ControlTests(unittest.TestCase):
     def test_repeat_message_is_deduplicated_after_reopen(self):
         self.run_message()
         self.assertEqual(self.run_message()['status'], 'duplicate')
-        with sqlite3.connect(self.db) as db:
+        with closing(sqlite3.connect(self.db)) as db, db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM requests').fetchone()[0], 1)
 
     def test_new_click_does_not_queue_concurrent_run(self):

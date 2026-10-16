@@ -1,3 +1,4 @@
+from contextlib import closing
 import copy
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -43,7 +44,7 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(claim(self.config, self.db, self.now+timedelta(days=1))['status'], 'empty')
 
     def test_queue_only_is_never_claimed_by_desktop_worker(self):
-        with connect(self.db) as db: db.execute("UPDATE requests SET mode='queue_only'")
+        with closing(connect(self.db)) as db, db: db.execute("UPDATE requests SET mode='queue_only'")
         self.assertEqual(claim(self.config, self.db, self.now)['status'], 'empty')
 
     def test_business_requires_executor_configuration(self):
@@ -71,10 +72,10 @@ class DispatchTests(unittest.TestCase):
     def test_old_queue_schema_migrates_without_losing_dedup(self):
         other = Path(self.tmp.name) / 'old.sqlite'
         import sqlite3
-        with sqlite3.connect(other) as db:
+        with closing(sqlite3.connect(other)) as db, db:
             db.execute('CREATE TABLE requests (key TEXT PRIMARY KEY,date TEXT,observed_at TEXT,command TEXT,status TEXT)')
             db.execute("INSERT INTO requests VALUES ('old','2026-10-14','now','rerun_today','queued')")
-        with connect(other) as db:
+        with closing(connect(other)) as db, db:
             old = db.execute('SELECT * FROM requests WHERE key=\'old\'').fetchone()
             self.assertEqual(old['mode'], 'queue_only')
             self.assertEqual(old['status'], 'queued')

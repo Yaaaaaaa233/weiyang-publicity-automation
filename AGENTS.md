@@ -52,4 +52,9 @@
 ### 2026-10-15 桌面连接实测更新
 
 - 0.2.3 已由 GUI 安装并重启，修复 v4 禁止 kind=plugin 的来源格式。实际本地探针通过，账本 bridge_verified，沿用 DSH 登录，读取规则并回写回执，全程未执行业务。私有回执位于 local/wecom-control-test/bridge-results；旧拒绝探针保留 needs_attention 与核查证据。
-- 当前 mode=desktop、purpose=bridge_test、business_executor_enabled=false，仅限已绑定标准模式专用会话。真实机器人/群/成员仍未配置，企业微信入站未通过；不要把本地通过称为业务或群触发通过。当前 Python 354 项、Node 12 场景通过，源代码与文档尚未提交推送。
+- 当前 mode=desktop、purpose=bridge_test、business_executor_enabled=false，仅限已绑定标准模式专用会话。真实机器人/群/成员仍未配置，企业微信入站未通过；不要把本地通过称为业务或群触发通过。当前 Python 354 项、Node 12 场景通过，源代码与文档已提交 d551894，尚未推送。Windows 已部署该快照并通过人工受限会话测试；这不等于 Windows 插件接续通过。Windows 首轮测试的三项 SQLite 清理报错已在 Mac 修正，Windows 补丁复测已通过：两个 Python 环境均 350 通过、4 项缺 Node 跳过、0 错误。Windows 插件接续尚待部署及实测。
+
+### 2026-10-15 Windows 接续更新
+
+- Windows 0.2.3 插件的本地连接测试通过，队列、真实标准模式模型会话、私有回执均核对 bridge_verified。请求在 Mac 生成后交付 Windows，不能称为群触发或 Windows 入队 CLI 通过。实际会话权限为“工作区内修改”，Auto review 尚未验收。一次 PowerShell ACL 初始化错误由文件工具接续完成，未改 ACL。
+- Windows 私有配置仍为 desktop/bridge_test、业务 false，群与成员为空；本轮无业务、转存、通知或调度改动。Windows 完整转存和业务多轮接续仍未通过。私有证据 local/windows-desktop-bridge-20261015。
